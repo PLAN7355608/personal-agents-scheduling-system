@@ -1,0 +1,118 @@
+# PASS — Personal Agents Scheduling System
+
+> **警告 / Warning**
+>
+> 这是一个**个人自用、仍在快速迭代中的实验性项目**，按「原样」提供，不附带任何担保；在真实机器上它会派工人**读写文件、执行终端命令**，请自行评估风险。
+> This is an **experimental, personal-use project under active development**. It is provided **as is**, without warranty of any kind. On a real machine it dispatches workers that **read/write files and run shell commands** — use at your own risk.
+>
+> 本仓库是**脱敏发行版**：不含任何个人数据、记忆库、密钥、机器路径或私有部署脚本。
+> This is a **sanitized distribution**: it contains **no personal data, no memory database, no credentials, no machine-specific paths or private deployment scripts**.
+
+PASS 是一个跑在 [DeepSeek Harness (DSH)](https://github.com/deepseek-ai) 上的个人 Agent 调度系统：你随口说的事，会被落成一条**可审计的任务**，由独立的「工人」代理去执行，结果再回到你面前。
+
+它不是一个聊天机器人，而是**一台调度器**：模型负责思考与判断，代码内核负责「不丢事、不越权、可追溯」。
+
+- **中文文档**：本页 · [English](README.en.md)
+- **架构图**：用浏览器直接打开 [`assets/arch-v0.4.html`](assets/arch-v0.4.html)（可点节点的交互图）
+- **架构说明**：[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+
+---
+
+## 它解决什么问题
+
+大模型很聪明，但会忘事、会跑偏：对话一关，任务状态就没了；让它直接动手，又容易越权。
+
+PASS 的做法是把「对话」和「干活」拆开：
+
+1. **Relay（传话层）**：听你说，把需求变成任务，只做建单/汇报，不干重活；
+2. **内核（代码）**：SQLite 事件账本 + 状态机，任务存不丢、每一步可审计、重启可恢复；
+3. **Worker（工人）**：每个任务由独立会话执行，有自己的工具白名单、权限档和审批策略；
+4. **线（Lane）**：一个来源一条线，线内串行、线间并行——同一个对话的事不会互相踩；
+5. **面板**：右下角胶囊实时显示在办/需要人/完成，工具申请可直接在面板批准或拒绝。
+
+## 核心能力
+
+| 能力 | 说明 |
+|---|---|
+| 事件账本 | append-only 事件是唯一真相源，投影可重建；schema 迁移前进不回头 |
+| 任务状态机 | `intake → triaged → queued → running → done/failed/blocked/cancelled`，非法流转拒绝 |
+| 多线并发 | 同一来源串行、不同来源并行；工人会话空闲只卸载、复用不换人 |
+| 多模型 | 任务级指定 `provider/model`，不同任务用不同模型，接新模型不动内核 |
+| 工具治理 | 工人工具白名单 → 规则/裁判（judge）→ 主人审批；系统边界（hosts、系统目录、提权命令）强制人工批准 |
+| 删除护栏 | 删除类命令限制范围与规模，超阈值升级审批，全程审计 |
+| 异步派单 | 建完即返回，不阻塞对话；结果可回到来源会话（`guiNotify` 开关，默认关） |
+| 账本副作用 | 简报、复盘、归档（默认只提议）、模板、记忆、人设 |
+
+## 架构一览
+
+```
+你（GUI / IM）
+   │ 说话
+   ▼
+Relay 会话（只听、只建单）
+   │ secretary_create_task（默认异步）
+   ▼
+内核（Host 插件）
+   ├─ SQLite 事件账本 + WorkItem 状态机
+   ├─ 线（Lane）路由：一来源一线，线内串行 / 线间并行
+   ├─ 派单：给每条线建/恢复一个 Worker 会话
+   └─ 看门狗：按任务最近活动判超时、回收卡住的线
+   │
+   ▼
+Worker 会话（独立工具面 + 白名单 + 审批）
+   ├─ 读文件 / 写文件 / 终端 / 搜索 / Office / 图像…
+   ├─ 系统边界（系统目录、提权命令、hosts）→ 必须申请
+   └─ 完成 → work_finish → 账本 → 面板 / 回灌
+```
+
+更完整的节点图见 [`assets/arch-v0.4.html`](assets/arch-v0.4.html)。
+
+## 安装
+
+要求：Windows / Linux / macOS 上已安装可用的 **DeepSeek Harness（DSH）**（Host 插件机制与 `cordis.patch.yml` 配置）。
+
+1. 把本仓库的 `plugin/` 目录作为本地插件登记到 DSH profile：
+   ```powershell
+   # 例：Windows，把插件链接进 profile 的 node_modules
+   cmd /c mklink /J "%USERPROFILE%\.dsh\profiles\desktop\node_modules\dsh-secretary-core" "E:\path\to\PASS\plugin"
+   ```
+   Linux / macOS 用 `ln -s`。
+2. 在 DSH 的 profile 配置中启用 `dsh-secretary-core`（插件 id：`secretary-core`，bundle 名：`dsh-secretary-core`）。
+3. 重启 DSH，确认右下角出现秘书胶囊。
+
+> `plugin/cordis.patch.yml` 里带了一套可用的 Relay / Worker preset 与默认配置；`workspaceRoot` 等路径请按自己的机器改。
+
+## 快速开始
+
+在注册了秘书的会话里直接说话即可（Relay 会自动建任务），也可以显式调用工具：
+
+- `secretary_create_task`：建任务（默认异步，建完即返回）
+- `secretary_status` / `secretary_wait`：看进度 / 按需等待
+- `secretary_tool_requests` + `secretary_decide_tool_request`：处理工人的工具申请（面板上也能点）
+- `secretary_models`：查看可路由模型
+- `secretary_prune` / `secretary_report` / `secretary_briefing`：清理、复盘、简报
+
+## 目录结构
+
+```
+plugin/                 # DSH Host 插件（内核）
+  index.js              # 工具、HTTP、定时器、守卫
+  client.js             # 右下角胶囊面板
+  src/                  # 状态机、DB、派单、守卫、判断器、记录表…
+  tests/                # 单元测试（node:test，进程内跑）
+  cordis.patch.yml      # Relay / Worker preset 与默认配置
+assets/arch-v0.4.html   # 可交互架构图
+docs/ARCHITECTURE.md    # 架构说明
+```
+
+## 状态与边界
+
+- 处于 **v0.x**：schema 16，单测 148/148（`node plugin/tests/run.mjs`）；
+- 目前定位**单机、单用户**；多机/多人边界尚未实现；
+- 取消任务只能让工人在**下一次工具调用**时停手，无法中断正在执行的单条命令或模型生成（需要 DSH agent 层 abort 接口）；
+- 自动选模型接口已预留（`workerModelAuto.enabled=false`，未启用）；
+- 语言服务、部分硬件的工具（打印/扫描）默认关闭，按需开启。
+
+## 许可
+
+[MIT](LICENSE)

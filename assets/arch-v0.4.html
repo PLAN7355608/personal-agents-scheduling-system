@@ -1,0 +1,966 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>个人秘书 · 基础架构 v0.4（可交互）</title>
+<style>
+:root{
+  --bg:#f8f9fb; --ink:#1c212f; --muted:#5c6576; --label:#7b8496; --hair:#e4e8f0;
+  --arrow:#95a0b2;
+  --user-f:#fcfcfd; --user-b:#c9cfdb; --user-a:#6c7585;
+  --entry-f:#eefaf8; --entry-b:#7ac4bc; --entry-a:#1e8d81;
+  --relay-f:#fdf5ea; --relay-b:#e2a862; --relay-a:#bf7a28;
+  --kernel-f:#f0f1fc; --kernel-b:#96a1e7; --kernel-a:#5f69c5;
+  --worker-f:#fff8e4; --worker-b:#dbb750; --worker-a:#b0841a;
+  --db-f:#f3f5f9; --db-b:#b0b9c8; --db-a:#646e80;
+  --cross-f:#edf5fb; --cross-b:#8bb1cd; --cross-a:#3478a0;
+  --ok:#15803d; --ok-bg:#e7f6ec; --part:#a15c07; --part-bg:#fdf1e0;
+  --todo:#b42318; --todo-bg:#fdeceb; --design:#475569; --design-bg:#eef1f5;
+  --shadow:0 1px 2px rgba(20,26,40,.04), 0 10px 28px rgba(20,26,40,.07);
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--bg); color:var(--ink);
+  font:14px/1.6 "PingFang SC","Microsoft YaHei","Hiragino Sans GB","Noto Sans SC",system-ui,-apple-system,"Segoe UI",sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+button{font:inherit;color:inherit;border:0;background:none;padding:0;cursor:pointer}
+code,.mono{font-family:var(--mono)}
+
+/* ---------- 顶栏 ---------- */
+.top{max-width:1860px;margin:0 auto;padding:26px 24px 0}
+.brand h1{font-size:26px;line-height:1.25;margin:0 0 6px;letter-spacing:.3px}
+.brand h1 em{font-style:normal;font-size:12px;font-weight:600;color:#3b6fb6;background:#eaf1fb;border:1px solid #cddff5;border-radius:999px;padding:2px 9px;vertical-align:3px;margin-left:8px}
+.brand p{margin:0;color:var(--muted);font-size:13.5px;max-width:1180px}
+.tabby{display:flex;gap:6px;margin:16px 0 0;border-bottom:1px solid var(--hair);padding-bottom:0}
+.tab-btn{padding:9px 16px;border-radius:10px 10px 0 0;color:var(--muted);font-weight:600;font-size:14px;border:1px solid transparent;border-bottom:0;position:relative;top:1px}
+.tab-btn:hover{color:var(--ink);background:#fff}
+.tab-btn.active{color:var(--ink);background:#fff;border-color:var(--hair)}
+.tab-btn .cnt{display:inline-block;min-width:20px;padding:0 6px;margin-left:6px;border-radius:999px;background:#eef1f6;color:#475569;font-size:11.5px;font-weight:700;line-height:19px;text-align:center}
+.tab-btn.active .cnt{background:#e6eefb;color:#2f5ea8}
+
+/* ---------- 工具条 ---------- */
+.bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding:12px 2px 12px;color:var(--label);font-size:12.5px}
+.bar .hint{color:#8a93a5}
+.lg{display:inline-flex;align-items:center;gap:6px}
+.dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+.dot.ok{background:#34a05e}.dot.part{background:#e09a2b}.dot.todo{background:#d9534f}.dot.design{background:#8b95a7}
+
+/* ---------- 图 ---------- */
+.wrap{max-width:1860px;margin:0 auto;padding:0 24px 40px}
+.panel{background:#fff;border:1px solid var(--hair);border-radius:16px;padding:18px;box-shadow:0 1px 2px rgba(20,26,40,.03)}
+.line{display:grid;gap:0;align-items:stretch;grid-template-columns:180px 44px 266px 44px 320px 44px minmax(496px,1fr) 44px 292px}
+.line .vconn{display:none}
+
+/* 卡片 */
+.card{position:relative;border:1.5px solid var(--b);background:var(--f);border-radius:14px;padding:13px 13px 11px;min-width:0;display:flex;flex-direction:column;transition:box-shadow .15s,border-color .15s,transform .15s;cursor:pointer}
+.card:hover{border-color:var(--a);box-shadow:var(--shadow)}
+.card.sel{box-shadow:0 0 0 2.5px var(--a),0 10px 26px rgba(20,26,40,.10)}
+.card:focus-visible{outline:2px solid var(--a);outline-offset:2px}
+.c-user{--f:var(--user-f);--b:var(--user-b);--a:var(--user-a)}
+.c-entry{--f:var(--entry-f);--b:var(--entry-b);--a:var(--entry-a)}
+.c-relay{--f:var(--relay-f);--b:var(--relay-b);--a:var(--relay-a)}
+.c-kernel{--f:var(--kernel-f);--b:var(--kernel-b);--a:var(--kernel-a)}
+.c-worker{--f:var(--worker-f);--b:var(--worker-b);--a:var(--worker-a)}
+.c-db{--f:var(--db-f);--b:var(--db-b);--a:var(--db-a)}
+.c-cross{--f:var(--cross-f);--b:var(--cross-b);--a:var(--cross-a)}
+.card h2{font-size:17.5px;margin:0;letter-spacing:.2px;display:inline}
+.c-kernel h2{font-size:19px}
+.sub{margin:3px 0 0;font-size:11.8px;color:var(--a);opacity:.92}
+.cardhead{display:flex;align-items:baseline;gap:8px;width:100%;text-align:left}
+.badge{font-size:10.5px;font-weight:700;border-radius:999px;padding:1px 8px;white-space:nowrap;line-height:17px}
+.badge.s-done{color:var(--ok);background:var(--ok-bg)}
+.badge.s-partial{color:var(--part);background:var(--part-bg)}
+.badge.s-todo{color:var(--todo);background:var(--todo-bg)}
+.badge.s-design{color:var(--design);background:var(--design-bg)}
+.items{list-style:none;margin:10px 0 0;padding:0;display:grid;gap:2px}
+.item{display:grid;grid-template-columns:16px 1fr;gap:4px;align-items:start;text-align:left;width:100%;padding:5px 6px;border-radius:8px;color:var(--muted);font-size:12.4px;line-height:1.5;transition:background .12s}
+.item:hover{background:rgba(255,255,255,.78);color:var(--ink)}
+.item.sel{background:#fff;color:var(--ink);box-shadow:inset 0 0 0 1.5px var(--a)}
+.item .bul{color:var(--a);font-weight:700;line-height:1.35;text-align:center}
+.item b{font-weight:700;color:var(--ink);font-size:12.4px}
+.item span.d{display:block;color:#7d8596;font-size:11.5px;margin-top:1px}
+
+/* 内核小格 */
+.kgrid{display:grid;gap:9px;margin-top:11px;grid-template-columns:repeat(auto-fit,minmax(206px,1fr))}
+.kn{display:block;text-align:left;background:#fafafd;border:1px solid #cdd1ee;border-radius:9px;padding:8px 10px 9px;min-width:0;transition:background .12s,border-color .12s,box-shadow .12s}
+.kn:hover{background:#fff;border-color:var(--kernel-a);box-shadow:0 4px 14px rgba(95,105,197,.13)}
+.kn.sel{background:#fff;border-color:var(--kernel-a);box-shadow:0 0 0 2px rgba(95,105,197,.35)}
+.kn b{display:block;font-size:13.4px;font-weight:700;letter-spacing:.1px}
+.kn span{display:block;font-size:11.3px;color:#6b7280;margin-top:2px;line-height:1.45;overflow-wrap:anywhere}
+.kn.wide{grid-column:1/-1;background:linear-gradient(180deg,#fbfbfe,#f6f7fc)}
+.paused{margin-top:14px;background:#fff;border:1px dashed #d9dfe9;border-radius:12px;padding:12px 15px;font-size:12.6px;color:#6b7280}
+.paused b{color:#39404f}
+.paused span{display:inline-block;margin:4px 12px 0 0;color:#8a93a5}
+
+/* 人物卡里的说明行 / 契约条 */
+.plainwrap{margin-top:10px;display:grid;gap:5px}
+.plain{display:grid;grid-template-columns:14px 1fr;gap:4px;font-size:12.3px;color:var(--muted);line-height:1.5}
+.plain .bul{color:var(--a);text-align:center;font-weight:700}
+.foot{margin-top:auto;border:1.1px solid var(--b);background:#fff;border-radius:8px;padding:7px 9px}
+.foot b{display:block;font-size:11.6px;color:var(--a)}
+.foot span{display:block;font-size:11.3px;color:#6b7280;margin-top:1px}
+.dbconn{display:flex;align-items:center;justify-content:center;gap:9px;margin:8px 0 0;color:var(--label);font-size:11.5px}
+.dbconn .l{width:1.5px;height:20px;background:var(--arrow);position:relative}
+.dbconn .l::after{content:"";position:absolute;bottom:-1px;left:-3.2px;border-top:7px solid var(--arrow);border-left:4.2px solid transparent;border-right:4.2px solid transparent}
+
+/* 迷你泳道 */
+.mini{margin-top:auto;background:#fff;border:1px solid #efdfc9;border-radius:10px;padding:8px 10px 9px}
+.mini .cap{font-size:10.8px;color:#9a7c4e;margin-bottom:5px}
+.lane{display:flex;align-items:center;gap:5px;margin:3px 0}
+.lane .lname{font-size:10.8px;color:#9a7c4e;width:28px;flex:0 0 28px}
+.lane i{width:26px;height:16px;border:1px solid var(--relay-b);background:#fef0da;border-radius:4px;font-style:normal;font-size:9.5px;color:#a5701f;display:grid;place-items:center}
+.lane s{text-decoration:none;color:#d2a86d;font-size:10px}
+
+/* 箭头 */
+.ar{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;color:var(--arrow);min-width:0}
+.ar .lab{font-size:10.5px;color:var(--label);white-space:nowrap;letter-spacing:.2px}
+.ar .b1,.ar .b2{position:relative;width:calc(100% - 10px);height:1.5px;background:var(--arrow);border-radius:2px}
+.ar .b1::after{content:"";position:absolute;right:-1px;top:-3.2px;border-left:7px solid var(--arrow);border-top:4.2px solid transparent;border-bottom:4.2px solid transparent}
+.ar .b2::after{content:"";position:absolute;left:-1px;top:-3.2px;border-right:7px solid var(--arrow);border-top:4.2px solid transparent;border-bottom:4.2px solid transparent}
+.ar.lit .lab{color:#3d4463;font-weight:700}
+.ar.lit .b1,.ar.lit .b2{background:#6b74cf;height:2px}
+.ar.lit .b1::after{border-left-color:#6b74cf}
+.ar.lit .b2::after{border-right-color:#6b74cf}
+
+/* 区块（数据库 / 跨机） */
+.band{margin-top:16px;border:1.5px solid var(--b);background:var(--f);border-radius:14px;padding:14px 16px 15px;transition:box-shadow .15s,border-color .15s}
+.band.sel{box-shadow:0 0 0 2.5px var(--a)}
+.bandhead{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;width:100%;text-align:left}
+.bandhead h2{font-size:18px;margin:0}
+.bandhead .note{font-size:12px;color:var(--a)}
+.bandhead .right{margin-left:auto;font-size:11.8px;color:var(--label);text-align:right}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.chip{border:1px solid #d7dce7;background:#fff;border-radius:999px;padding:4px 12px;font-family:var(--mono);font-size:11.8px;color:#3f4859;transition:.12s}
+.chip:hover{border-color:var(--a);color:#111827;box-shadow:0 3px 10px rgba(20,26,40,.08)}
+.chip.sel{border-color:var(--a);box-shadow:0 0 0 2px var(--a);color:#111827}
+.band .dbsub{margin:6px 0 0;font-size:12.6px;color:var(--muted)}
+.steps{display:flex;align-items:stretch;gap:8px;margin-top:12px}
+.step{flex:1 1 0;border:1.2px solid #c3d8e6;background:#fff;border-radius:11px;padding:10px 12px;text-align:left;min-width:0;transition:.12s}
+.step:hover{border-color:var(--cross-a);box-shadow:var(--shadow)}
+.step.sel{box-shadow:0 0 0 2px var(--cross-a)}
+.step b{display:block;font-size:13.6px}
+.step span{display:block;font-size:11.6px;color:#64819a;margin-top:2px;line-height:1.45}
+.sar{flex:0 0 42px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px}
+.sar .sl{font-size:10px;color:var(--label);white-space:nowrap}
+.sar .sb{position:relative;width:calc(100% - 8px);height:1.5px;background:var(--cross-b)}
+.sar .sb::after{content:"";position:absolute;right:-1px;top:-3.2px;border-left:7px solid var(--cross-b);border-top:4.2px solid transparent;border-bottom:4.2px solid transparent}
+.hintbar{margin:14px 0 0;font-size:12px;color:#8a93a5;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.pins{display:inline-flex;gap:8px;flex-wrap:wrap}
+.kbd{border:1px solid #dbe0ea;background:#fff;border-radius:5px;padding:0 5px;font-family:var(--mono);font-size:11px;color:#5c6576}
+
+/* ---------- 详情面板 ---------- */
+#scrim{position:fixed;inset:0;background:rgba(22,28,42,.26);opacity:0;pointer-events:none;transition:opacity .18s;z-index:35}
+#scrim.open{opacity:1;pointer-events:auto}
+#detail{position:fixed;top:0;right:0;width:min(452px,94vw);height:100%;background:#fff;border-left:1px solid var(--hair);
+  box-shadow:-10px 0 36px rgba(20,26,40,.13);transform:translateX(103%);transition:transform .22s ease;z-index:40;display:flex;flex-direction:column}
+#detail.open{transform:none}
+.dbody{overflow-y:auto;padding:22px 22px 34px;flex:1}
+.dbtn{position:absolute;top:14px;right:14px;width:32px;height:32px;border-radius:9px;background:#f2f4f8;color:#5c6576;font-size:16px;line-height:1}
+.dbtn:hover{background:#e8ebf2;color:#1c212f}
+.dlayer{font-size:11.5px;color:var(--label);letter-spacing:.4px;margin-bottom:6px}
+.dtitle{font-size:21px;line-height:1.35;margin:0 0 8px;padding-right:34px}
+.dwhat{margin:10px 0 0;color:#39404f;font-size:13.6px;line-height:1.75}
+.dsec{margin:20px 0 0;font-size:12px;font-weight:700;color:#8a93a5;letter-spacing:.6px}
+.impl{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:8px}
+.impl li{background:#f7f8fb;border:1px solid #e8ebf2;border-radius:9px;padding:8px 10px}
+.impl code{display:inline-block;font-size:12px;color:#334155;background:#fff;border:1px solid #e2e6ee;border-radius:6px;padding:1px 7px;margin-bottom:3px;word-break:break-all}
+.impl p{margin:2px 0 0;font-size:12.4px;color:var(--muted);line-height:1.6}
+.docs{margin:8px 0 0;display:flex;flex-wrap:wrap;gap:6px}
+.docs span{font-size:11.8px;color:#3b6fb6;background:#eef4fc;border:1px solid #d6e4f7;border-radius:999px;padding:2px 9px}
+.note{margin:8px 0 0;font-size:12.8px;line-height:1.7;color:#525b6b}
+.note.warn{color:#8a5a12;background:#fdf6e9;border:1px solid #f2e2c2;border-radius:9px;padding:8px 10px}
+.note.next{color:#1e5b8a;background:#eef7fd;border:1px solid #cfe6f6;border-radius:9px;padding:8px 10px}
+.empty{padding:44px 22px;color:#8a93a5;text-align:center}
+.empty b{display:block;color:#39404f;font-size:15px;margin-bottom:6px}
+.counts{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px;justify-content:center}
+.counts span{font-size:12px;color:#5c6576;background:#f5f7fa;border:1px solid #e6eaf1;border-radius:999px;padding:3px 10px}
+
+/* ---------- 下一步 ---------- */
+.grid2{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
+.nextcard{background:#fff;border:1px solid var(--hair);border-radius:14px;padding:16px 17px 15px;box-shadow:0 1px 2px rgba(20,26,40,.03)}
+.nextcard h3{margin:2px 0 8px;font-size:16.5px;line-height:1.45}
+.nextcard .tag{display:inline-block;font-size:11px;font-weight:700;border-radius:999px;padding:2px 9px;margin-right:6px;color:#8a5a12;background:#fdf3e3;border:1px solid #f0dfc0}
+.nextcard .tag.t2{color:#1e5b8a;background:#eef7fd;border-color:#cfe6f6}
+.nextcard .tag.t3{color:#6b4c9a;background:#f3eefc;border-color:#e2d6f5}
+.nextcard p{margin:6px 0 0;font-size:12.9px;color:var(--muted);line-height:1.72}
+.nextcard .ref{margin-top:10px;font-size:11.6px;color:#8a93a5}
+.nextcard .plan{margin-top:10px;font-size:12.6px;color:#39404f;background:#f7f9fc;border:1px dashed #dbe2ec;border-radius:9px;padding:8px 10px}
+
+.tabpane{display:none}
+.tabpane.active{display:block}
+
+/* ---------- 响应式 ---------- */
+@media (max-width:1699px){
+  .line{grid-template-columns:1fr 40px 1.18fr 40px 1.36fr;grid-template-areas:
+    "user a1 entry a2 relay"
+    "v3 v3 v3 v3 v3"
+    "kernel kernel kernel kernel kernel"
+    "v4 v4 v4 v4 v4"
+    "worker worker worker worker worker"}
+  .line .ar[data-a="1"]{grid-area:a1}.line .ar[data-a="2"]{grid-area:a2}
+  .line .ar[data-a="3"],.line .ar[data-a="4"]{display:none}
+  .line .vconn{display:flex;grid-column:1/-1;align-items:center;justify-content:center;gap:10px;padding:9px 0;color:var(--arrow);font-size:11px}
+  .line .vconn .vl{color:var(--label);font-size:11px}
+  .line .vconn .vc{width:1.5px;height:16px;background:var(--arrow);position:relative}
+  .line .vconn .vc::after{content:"";position:absolute;bottom:-1px;left:-3.2px;border-top:7px solid var(--arrow);border-left:4.2px solid transparent;border-right:4.2px solid transparent}
+  .line .vconn.lit .vl{color:#3d4463;font-weight:700}
+  .line .vconn.lit .vc{background:#6b74cf;width:2px}
+  .line .vconn.lit .vc::after{border-top-color:#6b74cf}
+  .card[data-card="user"]{grid-area:user}.card[data-card="entry"]{grid-area:entry}
+  .card[data-card="relay"]{grid-area:relay}.card[data-card="kernel"]{grid-area:kernel}
+  .card[data-card="worker"]{grid-area:worker}
+  .card[data-card="worker"] .items{grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:2px 10px}
+  .kgrid{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+}
+@media (max-width:900px){
+  .top{padding:18px 14px 0}
+  .brand h1{font-size:22px}
+  .brand p{font-size:12.5px}
+  .wrap{padding:0 14px 30px}
+  .panel{padding:12px;border-radius:13px}
+  .line{display:grid;grid-template-columns:1fr;grid-template-areas:none;gap:10px}
+  .line .ar,.line .vconn{display:none}
+  .line>.card{grid-area:auto}
+  .card[data-card],.line>.bandhead{grid-area:auto}
+  .steps{display:grid;grid-template-columns:1fr;gap:8px}
+  .sar{display:none}
+  .kgrid{grid-template-columns:1fr}
+  .card[data-card="worker"] .items{grid-template-columns:1fr}
+  .bar{padding:10px 0}
+  #detail{top:auto;bottom:0;left:0;right:0;width:auto;height:auto;max-height:78vh;border-left:0;border-top:1px solid var(--hair);border-radius:16px 16px 0 0;transform:translateY(104%);box-shadow:0 -10px 36px rgba(20,26,40,.16)}
+  #detail.open{transform:none}
+  #detail::before{content:"";display:block;width:42px;height:4px;border-radius:99px;background:#dbe0ea;margin:9px auto 0}
+  .dbody{padding:16px 16px 26px}
+  .dbtn{top:10px;right:10px}
+}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">
+    <h1>基础架构（v0.4）<em>可交互</em></h1>
+    <p>主线不变：主人 → 入口适配 → 对话层 Relay → 中央处理（内核）→ 工作者 Worker；中央处理下面挂一本账，另有跨机只读同步。点任意模块，看它<b>做什么、做到哪、下一步</b>。</p>
+  </div>
+  <nav class="tabby" role="tablist" aria-label="视图切换">
+    <button class="tab-btn active" role="tab" data-tab="arch" aria-selected="true">架构图</button>
+    <button class="tab-btn" role="tab" data-tab="next" aria-selected="false">下一步计划<span class="cnt" id="nextCnt">0</span></button>
+  </nav>
+</header>
+
+<main class="wrap">
+  <!-- ================= 架构图 ================= -->
+  <section class="tabpane active" id="pane-arch" role="tabpanel">
+    <div class="bar">
+      <span class="lg"><i class="dot ok"></i>已上线</span>
+      <span class="lg"><i class="dot part"></i>部分完成</span>
+      <span class="lg"><i class="dot todo"></i>待做</span>
+      <span class="lg"><i class="dot design"></i>设计前提</span>
+      <span class="hint">点卡片或小格展开详情；点空白处 / 按 <span class="kbd">Esc</span> 收起。</span>
+    </div>
+    <div class="panel">
+      <div class="line" id="line"></div>
+      <div class="dbconn"><span class="l"></span><span>唯一真相源 · 只有内核写</span></div>
+      <div id="bands"></div>
+      <div class="hintbar">
+        <span>箭头表示「请求（向右 / 向下）」与「回报（向左 / 向上）」两个方向；卡片大小不代表重要性。</span>
+        <span class="pins" id="pins"></span>
+        <span>版本 v0.4 · 对应代码 v0.31 / schema v16 · 2026-11-23</span>
+        <span>55 个可点节点 · 19 条下一步 · 单测 148/148</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 下一步计划 ================= -->
+  <section class="tabpane" id="pane-next" role="tabpanel">
+    <div class="bar"><span class="hint">按「模型 → 观察 → 安全 → 平台依赖 → 体验 / 质量 → 自动化 → 兼容 → 入口 → 评审」排，均来自 04 落地设计与 10-问题与待观察；最后附「暂缓」。</span></div>
+    <div class="grid2" id="nextList"></div>
+  </section>
+</main>
+
+<div id="scrim"></div>
+<noscript>
+  <div class="wrap"><p style="background:#fff;border:1px solid #e4e8f0;border-radius:12px;padding:14px 16px">
+    这个页面需要浏览器启用 JavaScript，才能在图上点开每个模块。放行后刷新即可；想看静态版请打开同目录的
+    <b>arch-v0.4.png</b>。
+  </p></div>
+</noscript>
+<aside id="detail" role="dialog" aria-modal="false" aria-label="模块详情">
+  <button class="dbtn" id="dclose" aria-label="收起详情">✕</button>
+  <div class="dbody" id="dbody"></div>
+</aside>
+
+<script>
+/* ============================================================
+   数据区：改文字只改这里，不用动 HTML 结构。
+   nodes = 图上的每个可点节点；layout = 图的结构；next = 下一步计划
+   ============================================================ */
+const DATA = /*DATA_START*/{
+"meta":{"version":"v0.4","code":"v0.31","schema":16,"date":"2026-11-23"},
+"layers":{"user":"用户","entry":"入口层","relay":"对话层","kernel":"内核","worker":"执行层","db":"存储","cross":"跨机","meta":"评审 / 外部"},
+"status":{"done":"已上线","partial":"部分完成","todo":"待做","design":"设计前提"},
+"nodes":{
+"user":{"title":"用户","short":"主人 · 只服务一人","layer":"user","status":"design",
+ "what":"只服务主人一个人。主人从任意入口说一句话，秘书把事办完再回报；不主动打扰，需要人时进面板或推送。",
+ "impl":[{"c":"单租户","n":"所有表带 owner_id，线程键含 owner，多用户只留缝（02 D14）"}],
+ "docs":["02 §1 目标与非目标","02 D14 多用户"],"limit":"v0 单租户；给别人用不在范围内。"},
+
+"entry":{"title":"入口适配","short":"频道无关 · 只翻译，不写业务","layer":"entry","status":"partial",
+ "what":"把任意频道的一句话说成统一信封交给内核，再把交付翻译回该频道。渠道只做协议翻译，不做业务判断——所以换入口不用动内核。",
+ "impl":[{"c":"src/gateway.js","n":"入站信封 / 出站投递的归一化与校验"},{"c":"cordis.patch.yml","n":"channel 配置、白名单与限速参数"},{"c":"06 入口契约","n":"ChannelAdapter 契约 v1.1：收 / 发 / 能力位 / 健康"}],
+ "docs":["02 §4 M1 接入网关","04 §14 v0.3 入口契约","06-入口契约分析"],"limit":"真实渠道目前只有 DSH GUI 与 HTTP；邮箱 / QQ / 微信 / PWA 都还没接。",
+ "next":"接微信 / PWA 入口（设备与账号风控是主要不确定性）。"},
+
+"entry-in":{"title":"入站","short":"统一信封 · 附件落地 · 频道策略","layer":"entry","status":"partial",
+ "what":"收消息时先把格式统一成 {channel, peer, text, files, ts, dedupKey}，再按频道策略（白名单 / 限速 / 幂等去重）过滤，通过后写 msg.received 事件；附件要落成内核副本再进任务。",
+ "impl":[{"c":"src/gateway.js","n":"信封归一化 + dedupKey 去重"},{"c":"POST /secretary/v1/inbound","n":"外部 adapter 投递入口（token 鉴权）"},{"c":"表 channel_policies / channel_health","n":"频道策略与健康记录"}],
+ "docs":["04 §4.1 内部契约","04 §14","04 §19 文件与指令不同步"],"limit":"附件目前只记录路径，还没做「内核入场快照」（复制到 attachments/<sha256>），外部通道存在附件晚到 / 源文件被移走的风险。"},
+
+"entry-out":{"title":"出站","short":"outbox · 回执 · 分开重试","layer":"entry","status":"partial",
+ "what":"结果回频道：文本与文件分开发、分开 ack；没收到回执就重试，不假装送达。",
+ "impl":[{"c":"src/outbox.js","n":"enqueue / listPending / ack / stats"},{"c":"POST /secretary/v1/outbox/:id/ack","n":"投递回执"},{"c":"表 outbox","n":"待投递队列：channel / peer / files / level / 重试"}],
+ "docs":["04 §18 v0.7 文件双向","04 §19 处理方案 3"],"limit":"outbox 已带 files，但「出站交付单」（files[{path,sha256}] + 文本文件分开 ack）还没做，ack 粒度仍偏粗。"},
+
+"relay":{"title":"对话层 Relay","short":"一条线一个工人 · 只传话","layer":"relay","status":"done",
+ "what":"每个来源会话是一条线（lane）；Relay 只负责听懂、建任务、把结果说出来，不背长期状态，重活交给工人。它自己的工具面被严格限死，不许动手。建任务默认**不等结果**（v0.31 异步派单）：回一句「已派出（id）」就结束这一轮，主人在同一会话能接着交代别的事；任务结束时结果由内核回灌（见 k-notify），只有主人明确说「等结果」才调 secretary_wait。",
+ "impl":[{"c":"index.js（relay preset 工具面）","n":"secretary_create_task / ask / remember / recall / status 等"},{"c":"src/guard.js","n":"RELAY_ALLOW 白名单：传话工具 + present，其余一律拒绝"},{"c":"secretary_create_task（v0.31）","n":"建完立即返回 queued；不等结果，汇报走回灌 / 面板"}],
+ "docs":["02 D2 会话形态","02 §7.1 线程模型","04 §20 Relay 白名单","04 §43 v0.31 异步派单"],"limit":"异步之后「下一单依赖上一单结果」要主人再推一句或显式 wait；任务依赖还没做（见下一步计划）。曾发生过 Relay 用 ego_cli 绕过沙箱写桌面的事件，已用白名单堵住（04 §21）。"},
+
+"relay-lane":{"title":"线（Lane）","short":"线内串行 · 线间并行 · 工人不换","layer":"relay","status":"done",
+ "what":"一个来源会话 = 一条线。线内任务排队串行、线间并行；每条线绑一个可复用的工人会话。空闲 30 分钟只卸载 agent、不清 session_id——下次派单先 resume 原会话（v0.24），resume 失败才新建，所以工人身份不随空闲丢。同会话不同工作区 / 不同焦点算不同线。",
+ "impl":[{"c":"src/lanes.js","n":"ensure / claim / release / nextQueued / laneContext / sweep / repair"},{"c":"表 lanes","n":"key = session:<id>@<工作区>#<焦点>；worker_session、status、last_used_at"},{"c":"dispatch.js","n":"sweepIdleLanes 只返回候选；派单时 agents.resume({resumeSessionId, setup}) 复用原工人"},{"c":"resume 的 setup（v0.31）","n":"恢复会话时用 agentPresets.mount 重新挂 worker preset，否则工具面丢失（实测 write/bash unknown tool）"}],
+ "docs":["04 §23 v0.10 会话泳道","04 §31 v0.18 任务工作区","04 §38 v0.24 工人身份持久化","04 §43 v0.31 resume 工具面修复"],"limit":"空闲回收后第一次派单要先 resume，比热复用略慢；实测重启 dsh-web 后同线仍复用同一工人会话。"},
+
+"relay-route":{"title":"工作流分线 / 路由诊断","short":"worker=new · focus 分线 · lane.routed","layer":"relay","status":"done",
+ "what":"决定一件事落在哪条线：线 key 已包含「工作区（@路径）+ 焦点（#目录，取任务里第一个绝对路径的父目录）」；create_task(worker=\"new\") 强制另起一条线和新工人（key 带 ~ 唯一后缀）；同文件 / 同项目默认复用。每单写 lane.routed 诊断事件（laneKey / focus / topic / workerParam / hasSession / idleGapMs / prevTopic / topicMismatch），先攒真实样本，再按数据调规则。",
+ "impl":[{"c":"lanes.js::laneKeyFor / focusFromText","n":"线身份 = 工作区 + 焦点；焦点从任务文本里的绝对路径取父目录"},{"c":"index.js::appendEvent(LANE_ROUTED)","n":"每单一条路由诊断，含 idleGap / topicMismatch"},{"c":"topic.js::classifyTopic","n":"规则版分类（file / doc / code / research / chat / other），不调模型"},{"c":"secretary_create_task(worker=\"new\")","n":"Relay 可强制另起工人"}],
+ "docs":["04 §38 v0.24 B/C 工作流分线","04 §39 v0.25 规则优先 + 路由诊断"],"limit":"分流目前纯规则，judge 不介入；Relay preset 里「有绝对路径就传 workspace / 不同工作流传 worker=new」两条只对新建的 Relay 会话生效。",
+ "next":"用几天样本统计复用率 / 拆线率 / 误拆率，再决定是否加 judge 低频 tie-breaker（带缓存与预算）。"},
+
+"relay-scope":{"title":"作用域（scope）","short":"项目根 + 相对路径前缀 · 三档","layer":"relay","status":"done",
+ "what":"项目 / 作用域是任务的属性，不是线的身份：记为「项目根 + 相对路径前缀」。三档：auto 高置信直接生效、suggest 默认只建议、manual 人工指定；低置信不猜。",
+ "impl":[{"c":"src/scope.js","n":"从绝对路径 / 项目名推断项目根与作用域"},{"c":"workitems.scope / scope_source / scope_confidence","n":"来源（自动 / 建议 / 手填）与置信度"}],
+ "docs":["04 §23","04 §25 面板显示线 / 作用域"],"limit":"作用域只影响「写哪、读哪」的提示，不替代文件沙箱边界。"},
+
+"relay-context":{"title":"本线上下文 & 交付","short":"注入上一件结果 · present / outbox","layer":"relay","status":"done",
+ "what":"派新任务时自动把「本线上下文」（上一件需求 / 结果 / 产物）注入工人提示词，避免重复交代背景；任务完成后走 present 卡片或外部通道 outbox.files 交付。回灌发起会话有两条路：adopt(backfill=true) 的老路，和 v0.31 起内核按 guiNotify / notify=true 回灌（见 k-notify）。",
+ "impl":[{"c":"lanes.js::laneContext","n":"取本线上一条完成任务的摘要与产物"},{"c":"src/dispatch.js","n":"拼进工人提示词的「本线上下文」段"},{"c":"secretary_adopt(backfill=true)","n":"任务结束把回执写回发起会话"}],
+ "docs":["04 §23","04 §24 v0.11 回灌","04 §18 文件双向"],"limit":"回灌会往发起会话排一条指令，主人正在用的会话慎用。"},
+
+"kernel":{"title":"中央处理（内核）","short":"确定性代码 · 不思考，但可调 judge","layer":"kernel","status":"done",
+ "what":"一个常驻 DSH Host 的确定性内核：记账、调度、裁决、审批。它「不思考」，需要判断时调用 judge（L1）；模型只活在 Relay 与 Worker 两个会话里。入口断了内核还在。",
+ "impl":[{"c":"plugin/index.js","n":"内核装配：事件、任务、调度、工具面、HTTP"},{"c":"src/db.js","n":"SQLite（WAL）建表与迁移 v1–v16"},{"c":"src/events.js / workitems.js / dispatch.js / recovery.js","n":"账本 / 状态机 / 派单 / 重启恢复"}],
+ "docs":["02 §0.3","02 D9 中央处理是否思考"],"limit":"内核不内嵌 LLM：任何「要不要、像不像」都走 rules 或 judge，避免主循环飘。"},
+
+"k-events":{"title":"事件账本","short":"append-only · 唯一真相源","layer":"kernel","status":"done",
+ "what":"一切变化先写事件，任务状态是事件投影出来的；事件只加不删，重启可回放。这是全系统唯一的真相源。",
+ "impl":[{"c":"src/events.js","n":"append / query"},{"c":"表 events","n":"seq / id / ts / type / actor / workitem_id / payload"},{"c":"04 §4.4 事件类型","n":"msg.received、item.state、delivery.decided、file.deleted、notify.sent / notify.failed 等，只加不删"}],
+ "docs":["02 P1 事件是唯一真相","04 §2 表结构"],"limit":"事件只增不减，长期需要归档 / 压缩策略（未做）。"},
+
+"k-fsm":{"title":"任务状态机","short":"intake → running → done / failed / blocked …","layer":"kernel","status":"done",
+ "what":"任务状态机：intake → triaged → queued → running → done / failed / blocked / waiting_human / cancelled / merged。每次转移都写 item.state（from / to / reason）；running → done 只能由 secretary_work_finish 触发，没有 finish 一律不算成功。",
+ "impl":[{"c":"src/workitems.js","n":"状态迁移、重试上限 2 次、取消、合并 / 拆分"},{"c":"表 workitems","n":"status / kind / intent / budget / parent_id / metrics / origin"}],
+ "docs":["04 §3 状态机","02 §7.2 完成判定"],"limit":"静默失败视为 bug：任何非终态超时都必须产生事件（至少 blocked）。"},
+
+"k-sched":{"title":"调度 / 派单","short":"串行 · 并行 · 去重 · 重试","layer":"kernel","status":"done",
+ "what":"线内串行、跨线并行；有延迟归并窗口；建单先做同类去重（k-dedupe）；看门狗负责派单超时、卡线修复、空闲线回收，活跃度按「任务最近事件」算（k-watchdog）；失败自动重试 ≤2 次（30s / 120s）。",
+ "impl":[{"c":"src/dispatch.js","n":"建工人会话、注入提示词、投递"},{"c":"lanes.js::sweep / repair","n":"空闲线回收、卡线修复、有排队但没拉起"},{"c":"src/recovery.js","n":"重启后未完成任务恢复"},{"c":"watchdog：MAX(events.ts)","n":"有工具事件就不算「无进展」，避免误判一直在干活的工人"}],
+ "docs":["04 §23 看门狗","04 §5.2 失败与恢复","02 §7.7 归并","04 §21.1 一活两单"],"limit":"等线中的 queued 不算派单超时（否则会误判）。"},
+
+"k-watchdog":{"title":"看门狗活跃度","short":"按任务最近事件算 · 不误判干活的人","layer":"kernel","status":"done",
+ "what":"判断「running 的工人是不是没进展」时，不再只看 workitems.updated_at，而是取这个任务最近一条事件的时间（events 里的 MAX(ts)）：工人一直在调工具、跑命令，就不算超时。之前只看时间戳，把正在干活的工人误判成「15 分钟无进展」并标 blocked，还顺手触发了重复派单。",
+ "impl":[{"c":"index.js 看门狗","n":"COALESCE((SELECT MAX(e.ts) FROM events e WHERE e.workitem_id = w.id), w.updated_at) < cutoff 才判超时"},{"c":"cfg.workerTimeoutSec","n":"默认 900 秒；看门狗每 30 秒扫一次"},{"c":"超时动作","n":"转 blocked（needsHuman）→ 关工人会话 → notifyDelivery(blocked) → 释放并推进本线"}],
+ "docs":["04 §21.1 一活两单","WORKLOG 2026-11-23 21:25–21:38"],"limit":"只解决「误判」：单条工具调用卡很久时同样没有新事件，仍会被判超时；要区分「长命令」得加心跳。"},
+
+"k-async":{"title":"异步派单","short":"建完即返回 · 不阻塞对话","layer":"kernel","status":"done",
+ "what":"secretary_create_task 建完账就返回「已派出（id）、queued」，不再等工人跑完。Relay 这一轮可以立刻结束，主人能在同一个会话里继续交代别的；结果靠回灌（k-notify）或面板看。secretary_wait 只在主人明确说「等结果」时才用。之前是同步等待：派完活这一轮不结束，主人就没法继续说话。",
+ "impl":[{"c":"index.js::secretary_create_task","n":"建账 → triaged → queued → scheduleDispatch → 立即返回 { workitem_id, status: 'queued' }"},{"c":"index.js::secretary_wait","n":"保留但默认不用：主人明确要求等结果时才调"},{"c":"relay preset 工具描述","n":"「建完立刻回主人一句已派出，默认不要等待」"}],
+ "docs":["04 §43 v0.31 异步派单","WORKLOG 2026-11-22 21:55–22:03"],"limit":"异步后「下一单依赖上一单结果」不会自动排队，要主人再推一句或显式 wait；任务依赖（DAG）还没做。"},
+
+"k-notify":{"title":"GUI 回灌","short":"guiNotify 默认关 · notify=true 单开","layer":"kernel","status":"done",
+ "what":"任务结束（done / failed / blocked）时，由内核把结果投回来源 Relay 会话（session.prompt），不用 Relay 干等。全局开关 guiNotify.enabled 默认 false（不打扰正在聊的事）；单任务 create_task(notify=true) 可覆盖。回灌成功写 notify.sent，失败写 notify.failed 兜底，结果仍能在面板看到。来源会话记在 workitems.source_session_id（schema v16）。",
+ "impl":[{"c":"index.js::notifyDelivery","n":"item.notify 或 cfg.guiNotify.enabled 任一为真，且来源是 gui、有 sourceSessionId 才回灌"},{"c":"promptSession(ctx, sourceSessionId)","n":"投一条「【秘书汇报】任务完成/失败/卡住：…（id）」"},{"c":"事件 notify.sent / notify.failed","n":"成功与失败都留痕，失败不重试、不阻塞"},{"c":"workitems.notify / source_session_id","n":"schema v16 新增两列，面板 / 账本可审计"}],
+ "docs":["04 §43 v0.31 GUI 回灌","WORKLOG 2026-11-22 21:55–22:03"],"limit":"回灌等于往 Relay 会话里插一条消息，可能打断主人正在说的话，所以默认关；失败只记事件，不自动重发。"},
+
+"k-dedupe":{"title":"派单去重","short":"同工作区同类在办 → 复用不建单","layer":"kernel","status":"done",
+ "what":"建任务前先看同工作区有没有「同类在办」的任务（intake / triaged / queued / running / waiting_human / blocked）：需求文本归一化后用字符级最长公共子序列算相似度，≥0.85 就判同类，直接返回 reused 和原任务 id，不再建新单——避免一活两单、两个工人并发改同一台机器。确实要另起一单传 force=true。",
+ "impl":[{"c":"src/dedupe.js::normalizeIntent / intentSimilar","n":"去空白与标点后比 LCS；短于 12 字的文本不判相似，避免误复用"},{"c":"src/dedupe.js::pickDuplicate","n":"在同工作区候选里取第一条相似的"},{"c":"index.js::secretary_create_task(force)","n":"force=true 绕过去重；命中返回 { reused: true, workitem_id, status }"}],
+ "docs":["04 §21.1 一活两单","WORKLOG 2026-11-23 21:25–21:38","plugin/tests/unit/dedupe.test.mjs"],"limit":"纯规则相似度：「几乎一样但确实不同」的任务会被并到旧单（reused 只在返回值里说，不弹确认）；阈值是否合适还要看真实样本。"},
+
+"k-wm":{"title":"Worker 管理","short":"preset · 权限档 · 审批默认 ask · 白名单","layer":"kernel","status":"done",
+ "what":"建工人会话时定三件事：预设 preset、权限档（默认 workspace-write，可申请 danger-full-access / read-only / auto-review）、审批策略（默认 ask，无人值守时审批请求失败即拒绝）；工具按白名单 + 申请放行。线绑的会话空闲只卸载不换人：派单时优先 resume 原会话，并且 resume 带 setup 重新挂 worker preset（v0.31 修的大 bug：不重挂就会恢复出一个没有工具的工人）。",
+ "impl":[{"c":"src/dispatch.js","n":"workerPermissionPreset、session.create(cwd)、agents.resume({ resumeSessionId, setup })"},{"c":"agentPresets.resolve + mount","n":"resume 时重新挂 worker preset；服务不可用宁可新建也不裸 resume"},{"c":"src/workspace.js","n":"resolveTaskWorkspace：必须是存在的绝对目录"},{"c":"表 sessions","n":"id / role(relay|worker) / preset / 绑定的线与任务"}],
+ "docs":["04 §20 v0.8 权限档","04 §31 任务工作区","04 §38 工人身份持久化","04 §43 v0.31 resume 修复","04 §27 白名单"],"limit":"工人会话在 GUI 里仍归「未分组」（DSH 暂无 workspace attach 接口）。"},
+
+"k-model":{"title":"模型路由","short":"15 个模型 · 任务级优先 · 不换工人","layer":"kernel","status":"done",
+ "what":"派单时给工人挑模型，不动 Relay / 对话层。优先级从高到低：任务级显式指定 model: provider/model（Relay 或主人点名）→ workerModelByTopic[topic] → 全局 workerModel → 跟随 DSH 默认。切换模型不换工人：同一个工人会话可以中途换（agent.model.select 只追加模型选择事件，不写 DSH 全局默认），只影响这个工人。任务实际用的模型会落账（item.running 的 payload.model、workitems.model）。",
+ "impl":[{"c":"dispatch.js::parseModelRef / resolveWorkerModel","n":"显式 model → byTopic → workerModel → 空（DSH 默认）"},{"c":"15 个可路由模型","n":"DeepSeek：deepseek-official / deepseek-account（deepseek-flash、deepseek-v4-pro）；GLM zai：glm-4.7 / glm-5-turbo / glm-5.2 / glm-5.2-highspeed / glm-5.3 / glm-5.3-flash / glm-5.3-highspeed；Kimi moonshotai-cn：kimi-k2.6 / kimi-k2.7-code / kimi-k2.7-code-highspeed / kimi-k3"},{"c":"secretary_models","n":"列出 DSH 当前可路由模型：provider 分组 / 模型 / 推理档位 / 默认值 / 当前配置"},{"c":"agent.model.select（不写全局默认）","n":"只影响这个工人，不污染 Relay 与 DSH 默认"},{"c":"workitems.model（schema v14）","n":"任务实际 / 指定的模型，可审计"},{"c":"Relay preset 规则","n":"主人点名模型才传 model，没点名不许自己挑"}],
+ "docs":["11-模型接入与选择","04 §41 v0.28 工人模型可选","WORKLOG 2026-11-21 14:31–15:48"],"limit":"自动选模型接口预留（workerModelAuto.enabled = false），暂不启用；模型切换用 agent.model.select（只追加会话选择，不写全局默认）。",
+ "next":"自动选模型要等 DEV-001 模型效果记录表有数据后再定策略（按任务复杂度 / 历史效果 / 价格），Relay 没被点名时不自己挑。"},
+
+"k-gov":{"title":"工具治理","short":"M1 申请 → M2 裁判 → M3 策略学习","layer":"kernel","status":"done",
+ "what":"工人遇到白名单外的工具先申请：黑名单直接拒 → 策略学习命中直接放行 → judge 裁判 → 拿不准上报主人。每次决定都写 tool_requests 与 judge_calls，范围和有效期可审计。",
+ "impl":[{"c":"src/tool-requests.js","n":"建单 / 授权 / 过期 / 学习"},{"c":"src/judge.js::judgeToolDecision","n":"M2：一次模型判断，失败即 escalate"},{"c":"表 tool_requests","n":"tool / reason / status / decided_by / scope_granted / expires_at"}],
+ "docs":["08-工具治理 全文","04 §28–30 M1/M2/M3"],"limit":"策略学习目前只有「线」和「全局」两档，项目级（同项目不同线）待加。"},
+
+"k-judge":{"title":"judge 裁判（L1）","short":"已上线 · 只用于工具审批","layer":"kernel","status":"partial",
+ "what":"已上线，但只接了一处：工具审批（tool_decision）。规则拿不准时调一次模型，返回 {decision, reason, scope}；解析失败 / 超时 / 空输出一律 escalate（绝不擅自放行），每次调用写 judge_calls。任务分流、语言组织等其它判断都还没接 judge。",
+ "impl":[{"c":"src/judge.js","n":"JUDGE_KIND = tool_decision；judgeToolDecision 模型调用 + JSON 解析 + 安全默认"},{"c":"表 judge_calls","n":"kind / 输入 hash / 输出 JSON / 耗时 / 模型"},{"c":"judge { enabled, provider, model, timeoutMs }","n":"默认开启，模型 deepseek-flash"}],
+ "docs":["02 §7.6 判断服务","04 §29 M2","04 §38 judge 现状"],"limit":"intent / route / urgency / group 只是预留接口，实际判断仍走规则；语言服务也不经 judge。",
+ "next":"分流先攒 lane.routed 样本，judge 只在规则真拿不准时做低频 tie-breaker（带缓存、预算、熔断）。"},
+
+"k-mem":{"title":"记忆","short":"事实 / 画像 / 纪事 · 可纠正可遗忘","layer":"kernel","status":"done",
+ "what":"三条写入路径：主人明说「记住」、任务完成抽取、日终摘要。每条带来源与置信度；remember / forget 都写事件；派单时按任务召回最多 2 条相关事实，画像与口吻不进工人提示词。",
+ "impl":[{"c":"src/memory.js","n":"写入 / 检索 / 覆盖 / 遗忘"},{"c":"表 memories + memories_fts","n":"type / key / text / source / confidence / valid_from / superseded_by"},{"c":"事件 memory.remember / memory.forget","n":"谁记了 / 忘了什么可查"}],
+ "docs":["04 §22 v0.9 记忆事件审计","02 §7.5 记忆写入","04 §32 workerFacts"],"limit":"低置信记忆不参与重要判断；纠正时旧版本留痕但不注入。"},
+
+"k-persona":{"title":"人设","short":"preset 骨架红线 + DB 语气覆盖","layer":"kernel","status":"done",
+ "what":"分层：preset 只存骨架与红线（文件），语气项（称呼 / 口头禅 / 语气 / 敬语）存数据库 persona_overrides，按 owner 隔离；工人提示词注入骨架，Relay 用工具读写语气项。",
+ "impl":[{"c":"src/persona.js","n":"白名单键位 + 按 owner 读取"},{"c":"表 persona_overrides","n":"key / value / owner"},{"c":"secretary_persona_get / set","n":"Relay 侧读取与修改"}],
+ "docs":["02 D15 人设分层","04 §15 v0.4","02 §14"],"limit":"红线与安全规则不可改；情绪层 v0 不做（D16）。"},
+
+"k-http":{"title":"HTTP 面板 & 审批","short":"/panel · 批准 / 拒绝工具申请","layer":"kernel","status":"done",
+ "what":"token 鉴权的 HTTP：健康、面板数据、线、任务、单任务 trace、outbox；写入口有四个——POST /inbound（外部 adapter）、POST /tasks（外部入口建任务）、POST /outbox/:id/ack（回执）、POST /tool-requests/decide（批准 / 拒绝工具申请）。面板是右下角胶囊：待批工具申请直接给「批准 / 拒绝」两个按钮（approve 只给 once），/panel 同时列出 pending 与 escalated（之前 escalated 挂在面板外看不到）。",
+ "impl":[{"c":"GET /secretary/v1/{status,panel,lanes,workitems,workitems/:id/trace,outbox}","n":"只读查询；/panel 带 toolRequests（pending+escalated，最多 10 条）"},{"c":"POST /secretary/v1/tool-requests/decide","n":"{ id, approve, scope } → decideToolRequest(decidedBy=owner)；面板只批 once"},{"c":"client.js","n":"右下角胶囊：在办 / 需要人 / 待批工具（批准·拒绝按钮）/ 外部入口结果"},{"c":"同源守卫（authorized）","n":"无 token 时写操作必须同源 Origin：外站 401；POST 必须 application/json，否则 415"}],
+ "docs":["04 §4.3 HTTP","04 §23 /lanes","04 §33 httpResults","WORKLOG 2026-11-23 21:41–21:47 面板审批"],"limit":"除工具申请审批外仍只读；面板审批只给 once，lane / global 还得在对话里批。"},
+
+"k-reporter":{"title":"Reporter 交付决策","short":"L0–L3 · 静音时段 · 每日预算","layer":"kernel","status":"partial",
+ "what":"决定一条消息该用哪级打扰：L0 只记账 / L1 进面板 / L2 回当前对话 / L3 主动推送。只有「需要人」和「出错」够格 L3，且受静音时段（默认 23–8）与每日预算（默认 6 条）限制，超了就降级成 L2。",
+ "impl":[{"c":"src/reporter.js","n":"decideDelivery / isQuietHour / countL3Today / deliveryBudget"},{"c":"事件 delivery.decided","n":"每次交付决策都落账"},{"c":"src/language.js","n":"语言服务：只改写不加事实，失败回退原文（enabled 默认 false）"}],
+ "docs":["02 §7.3 打扰策略","04 §32 语言服务骨架"],"limit":"真正的 L3 推送要等入口 adapter（PWA / IM）到位；语言服务已接在 outbox 之前但默认关闭。",
+ "next":"语言服务先在直连通道灰度，稳定后再默认开启。"},
+
+"k-brief":{"title":"简报 / 复盘","short":"日报 08:30 · 周报周一 09:00","layer":"kernel","status":"done",
+ "what":"每日 / 每周简报：直接从账本汇总成人能看的 markdown（办成的、卡住的、产物、待批工具申请、记录表），不调模型；默认开启（每天 08:30、周一 09:00），可 on / off，写到 workspaceRoot/简报/YYYY-MM-DD-日报.md，面板显示最近一份摘要。复盘按最近 N 天统计任务 / 状态 / 类型 / 平均耗时 / 产物 / 删除审计 / judge 调用 / 工具申请 / 失败明细，也落成 markdown。",
+ "impl":[{"c":"src/briefing.js","n":"buildBrief / buildReview / writeReport"},{"c":"secretary_briefing","n":"get（看最近一份）/ run（立即生成）/ on / off / status"},{"c":"secretary_report(days)","n":"最近 N 天复盘 → markdown 文件"},{"c":"表 app_state","n":"存简报开关与上次发送时间（schema v13）"}],
+ "docs":["04 §40 v0.26 简报 / 模板 / 归档 / 复盘"],"limit":"内容只来自账本，不做解读或建议（不调模型）；简报 / 复盘属于 Relay 面工具，工人白名单不放行。"},
+
+"worker":{"title":"工作者 Worker","short":"可丢弃 · 完成必须写事件","layer":"worker","status":"done",
+ "what":"每个任务派给一个工人会话：想复杂的事、动手干活、写产物。干完必须调 secretary_work_finish 写事件，否则不算完成；会话可丢弃、可在线内复用、也可用旧会话 seed 出来。",
+ "impl":[{"c":"src/dispatch.js","n":"提示词拼装 + 派单"},{"c":"secretary_work_finish / fail / update","n":"完成契约：唯一能把任务置 done 的入口"},{"c":"表 sessions（role=worker）","n":"谁在干活、干到哪一步"}],
+ "docs":["04 §5 关键流程","04 §26 老会话 seed"],"limit":"工人没有 GUI：所有可见性走面板与 trace。"},
+
+"w-whitelist":{"title":"工具白名单","short":"只放行 fs / 终端 / 搜索 / office","layer":"worker","status":"done",
+ "what":"工人会话（sessions.role=worker）只放行白名单：文件读写、终端、搜索抓取、图片生成 / 编辑、office/univer、语音、job、todo、skill，外加秘书工具里的 work_* / wait / status / request_tool。名单外一律拒绝并提示改用允许工具或 work_fail。模板（secretary_templates）、归档（secretary_archive）、简报（secretary_briefing）是 Relay 面工具，不给工人。",
+ "impl":[{"c":"src/guard.js","n":"WORKER_ALLOW 正则白名单 + 硬黑名单"},{"c":"硬黑名单","n":"ego_*（node 逃生口）/ plugin_* / dsh_im_* / printer_* / scanner_* / ksp_* / subagent*"},{"c":"Relay 面不进工人名单","n":"secretary_templates / secretary_archive / secretary_briefing / secretary_report"}],
+ "docs":["04 §27 v0.14","04 §21 沙箱逃逸事件","04 §40 模板 / 归档 / 简报"],"limit":"白名单 + 黑名单双层，新增插件工具默认不放行；确实要用的名单外工具走申请。"},
+
+"w-boundary":{"title":"系统边界护栏","short":"系统目录 / 提权命令一律拒","layer":"worker","status":"done",
+ "what":"工人每次调工具前先过系统保护边界：写系统目录（Windows、Program Files、ProgramData、INetCache）直接拒；命令里出现 -Verb RunAs / Start-Process -Verb RunAs、schtasks /create、takeown / icacls 改系统目录、reg add HKLM、写 drivers\\etc\\hosts 也拒。要动系统必须先 secretary_request_tool 申请，主人批准（有 hasToolGrant）才放行。这是 11-23 第二次逃逸后加的：工人曾用管理员 PowerShell 绕过 hosts 写保护。",
+ "impl":[{"c":"src/protected.js::isProtectedPath","n":"写类工具（write / edit / apply_patch）判目标路径是否系统目录"},{"c":"src/protected.js::escalationReason","n":"bash / pwsh 命令匹配提权与系统修改模式，返回命中原因"},{"c":"index.js tools.guard","n":"命中且 hasToolGrant=false 时拒绝，并提示走 secretary_request_tool"},{"c":"只放行有授权的调用","n":"一次批准（once）只对本任务生效，不长期免审"}],
+ "docs":["04 §21.1 第二次逃逸","plugin/tests/unit/protected.test.mjs","WORKLOG 2026-11-23 21:25–21:38"],"limit":"只做静态匹配：变量拼接、写脚本再执行、计划任务里间接改系统识别不到；要彻底堵住得靠权限 / 沙箱层。"},
+
+"w-stop":{"title":"取消即停手","short":"cancelled / blocked 后下一次调用即中止","layer":"worker","status":"done",
+ "what":"任务被取消（cancelled）、合并（merged）或判 blocked 之后，工人下一次工具调用直接被守卫拒绝，并收到「立即停止，不要再改文件或系统」的指令——不再等模型自己发现任务已结束。事故里工人 A 被取消后还继续跑 5 分钟、提权改 hosts，就是因为取消只改了状态。",
+ "impl":[{"c":"index.js tools.guard","n":"按 sessions.workitem_id 查任务状态，命中 cancelled / merged / blocked 即拒绝"},{"c":"secretary_cancel_task","n":"把任务置 cancelled（终态）；拦在守卫层生效"},{"c":"实测","n":"取消后下一次 pwsh 被拦，工人立即退出"}],
+ "docs":["04 §21.1 遗留","WORKLOG 2026-11-23 21:25–21:38"],"limit":"拦不住正在进行的那一次模型生成或单条命令；彻底 abort 要等 DSH agent 层接口。"},
+
+"w-assets":{"title":"模板 / 归档","short":"文档模板 · 归档默认只提议","layer":"worker","status":"done",
+ "what":"模板：templates/*.md 放常用文档模板，secretary_templates 的 list / get 只读取用，不强制格式（上级要求常变）。归档：每小时扫 watchDirs，按扩展名规则（pdf / docx / xlsx…）挑 24h 以上的文件出候选，默认 allowApply=false 只提议不移动；确认后打开才会移动，目标模板支持 {workspace} / {ext} / {yyyy} / {mm}。两者都是主人侧（Relay）工具，工人白名单不放行。",
+ "impl":[{"c":"src/archive.js","n":"scanArchive / applyArchive（重名自动加后缀，失败的留清单）"},{"c":"secretary_archive","n":"scan 只列候选 / apply 真移动 / status"},{"c":"secretary_templates","n":"list / get：读 templates/ 下的 markdown"},{"c":"archive.watchDirs / allowApply","n":"默认 false；候选显示在面板"}],
+ "docs":["04 §40 v0.26"],"limit":"默认只提议、不动文件；要移动需先把配置 allowApply 打开（下一步试点）。",
+ "next":"先让主人确认几轮候选质量，再打开 allowApply 试点（限定 watchDirs 与规则，移动留日志）。"},
+
+"w-request":{"title":"工具申请与审批","short":"request_tool → 规则 / judge / 主人","layer":"worker","status":"done",
+ "what":"工人需要名单外工具时调 secretary_request_tool（最多等 60 秒）：黑名单直接 forbidden → 策略学习命中直接 allowed → judge 裁判 → 拿不准上报主人等拍板。授权按 once / lane / global 三档，全部落工具申请表审计。",
+ "impl":[{"c":"secretary_request_tool / _tool_requests / _decide_tool_request","n":"申请 / 查看 / 批准"},{"c":"src/tool-requests.js","n":"hasToolGrant：once（本任务）/ lane（本线 24h）/ global（长期）"},{"c":"表 tool_requests","n":"含 decided_by（rule / judge / owner）与依据"}],
+ "docs":["08 §2 流程 / §3 范围","04 §28–30"],"limit":"项目级策略学习未做；面板现在能批（只给 once），lane / global 仍要在对话里批。"},
+
+"w-perm":{"title":"权限档","short":"workspace-write 默认 · 高风险须显式","layer":"worker","status":"done",
+ "what":"工人默认 workspace-write：工作区内可写、区外只读，由 DSH 文件沙箱兜底；需要区外写时显式申请 danger-full-access（或 read-only / auto-review），派单时生效并记进任务审计。",
+ "impl":[{"c":"dispatch.js::workerPermissionPreset","n":"默认 workspace-write"},{"c":"secretary_create_task(permission)","n":"按任务申请更高权限"},{"c":"workitems.permission","n":"落库审计（trace 可见）"}],
+ "docs":["04 §20 v0.8","04 §21 越权事件"],"limit":"当前审批策略默认 ask（无人值守时审批请求失败即拒绝），elevated 必须由任务显式申请。"},
+
+"w-adopt":{"title":"adopt / seed 旧会话","short":"登记旧会话 · 或 seed 成新工人","layer":"worker","status":"done",
+ "what":"secretary_adopt 可以把已有会话登记成某条线的工人：reuse 模式先做资格检查（不是工人预设默认拒绝，超 7 天附警告）；seed 模式读老会话历史生成一个全新工人会话，老会话只读不动。",
+ "impl":[{"c":"secretary_adopt(session_id, lane_key, mode, force, backfill)","n":"reuse / seed 两种模式"},{"c":"src/session-store.js","n":"读老会话多帧 zstd 日志"},{"c":"seedMaxEvents","n":"默认 500 条事件上限"}],
+ "docs":["04 §24 v0.11 登记","04 §26 v0.13 seed"],"limit":"seed 上限 500 条事件，超大会话目前直接拒绝。",
+ "next":"超大会话（>500 条）的兼容方案待定：截断摘要 / 分帧读取 / 只带最近上下文。"},
+
+"w-model":{"title":"模型 / 思考过程","short":"同一工人可切模型 · GLM 要开思考","layer":"worker","status":"done",
+ "what":"模型由内核在派单时决定，落在工人会话上；切换模型不换工人——同一个工人会话里可以直接换（实测把任务切到 kimi-k3，request/header 显示 reason=change，会话没重建）。思考过程属于 provider 配置：GLM（zai）要在 DSH profile 里加 reasoning: high + compat.thinkingFormat: zai 才返回思考（ISS-004，已配置并验证）；Kimi 不用额外配置本来就有思考。usage 字段各家不同：GLM 报 cacheRead、Kimi 报 cacheWrite。",
+ "impl":[{"c":"DSH profile cordis.patch.yml（zai）","n":"reasoning: high + compat: { thinkingFormat: zai }——智谱的思考参数是 thinking: { type }"},{"c":"DSH profile（qwen，11-23 修）","n":"compat: { supportsDeveloperRole: false }——千问不接受 developer 角色，不关就 400"},{"c":"agent.model.select","n":"同一工人会话内切模型，不重建会话，不写全局默认"},{"c":"usage：cacheRead / cacheWrite","n":"各家字段不同，DEV-003 成本表两个都要记"},{"c":"实测","n":"GLM-5.3 首次出现 reasoning block（129 字）；Kimi K3 切换后正常回复（reason=change）；千问补 compat 后不再 400"}],
+ "docs":["11-模型接入与选择 §二 / §五","10-问题与待观察 ISS-004","WORKLOG 2026-11-21 15:36–15:48","WORKLOG 2026-11-23 20:28–20:53 qwen compat"],"limit":"思考过程 / 角色兼容都是 DSH provider 侧配置，不属于秘书内核；换机器 / 换用户要自己配一遍（配错就是 0 字 reasoning 或 400）。"},
+
+"w-prompt":{"title":"提示词 v3","short":"段式拼装 · 原文永不截断","layer":"worker","status":"done",
+ "what":"工人提示词按段拼装（任务 / 工作区 / 项目作用域 / 输入文件 / 本线上下文 / 候选文件 / 背景 / 事实纪律 / 完成要求）；v0.27 修了截断 bug：任务原文与完成要求永不截断，预算只裁可选段，默认预算 700 → 4000 字，超过 30000 字直接报错而不是静默截断。",
+ "impl":[{"c":"src/dispatch.js","n":"workerPromptMaxChars（默认 4000）/ workerPromptMaxFacts（默认 2）；HARD_MAX = 30000"},{"c":"【本地文件】段","n":"先 find / grep，给出 searchDirs，找不到再上网并注明"},{"c":"【事实纪律】段","n":"数据可追溯，无法核实写「待核」"}],
+ "docs":["04 §32 v0.19 瘦身","04 §33 提示词 v3","10-问题与待观察 ISS-003 v0.27 截断修复"],"limit":"实测真实任务派单约 4000 字以内；长任务不再被静默截断，但超过 3 万字会直接报错。"},
+
+"w-sniff":{"title":"文件嗅探 & 渲染预算","short":"白名单找候选 · 渲染最多 3 次","layer":"worker","status":"partial",
+ "what":"判定任务要读本地文件后，在白名单目录 searchDirs 里按「文件名与任务中文二元词重合度」找候选（限深度 3、最多 4000 个文件、跳过 node_modules/.git），取最多 6 个带日期注入提示词；文档 / 图片产物可渲染自检最多 3 次，纯文本不渲染。",
+ "impl":[{"c":"src/filesniff.js","n":"looksLikeFileTask / sniffFiles"},{"c":"workerRenderMax","n":"默认 3：渲染失败可修一次再渲，超预算就 work_fail"}],
+ "docs":["04 §34 v0.21 文件嗅探 + 渲染预算"],"limit":"候选可能包含上次生成的产物（还没按本任务 / 本线产物路径过滤）；3 次渲染预算是否合适仍在观察。",
+ "next":"候选文件过滤：排除本任务自己生成的产物；观察 3 次渲染预算是否够用。"},
+
+"w-delguard":{"title":"删除护栏","short":"删前拦 · 大删除转审批","layer":"worker","status":"done",
+ "what":"解析 bash / pwsh 里的删除命令（rm、rmdir、unlink、shred、truncate、dd、mkfs、find -delete、Remove-Item、del），按 && / ; / | 分段顺序跟踪 cd / pushd，相对路径按当前目录解析（所以「cd /tmp && rm -rf zz」会被拒）；目标必须在工作区 + searchDirs 内，根目录 / 家目录 / 通配符 / 工作区根本身一律拒绝；单次删除超过 50 个文件转审批（file.delete 申请）；放行的删除写 file.deleted 事件（路径 / 数量 / 字节 / 命令摘要）。v0.22 上线，v0.23 修了 cd 解析与审计准确性。",
+ "impl":[{"c":"src/deletion-guard.js","n":"analyzeDeletionCommand：分段跟踪 cd / pushd、相对路径解析、rawTargets 原始写法"},{"c":"deletionGuard.maxFilesAuto","n":"默认 50，超过转 file.delete 审批"},{"c":"事件 file.deleted","n":"放行的删除留审计：路径 / 数量 / 字节 / 命令摘要"}],
+ "docs":["04 §35 护栏现状","04 §36 v0.22 实现与实测","04 §37 v0.23 cd 解析修复"],"limit":"阈值按「单条命令」算：多次小删除仍可绕过（按任务累计计数未做，见下一步）。",
+ "next":"按 workitem 累计删除数再加一道闸，防多次小删绕过。"},
+
+"db":{"title":"数据库","short":"SQLite 单文件 · 唯一真相源","layer":"db","status":"done",
+ "what":"一个 SQLite 文件（WAL）装事件账本与投影表；只有内核写，面板 / trace 只读；重启按事件回放重建投影。表结构随迭代迁移，当前 schema v16。",
+ "impl":[{"c":"src/db.js","n":"迁移 v1–v16：账本 / 任务 / 线 / 工具治理 / 工作区 / origin / app_state / 模型列（v14）/ events.peer（v15）/ 来源会话与回灌（v16）"},{"c":"~/.dsh/secretary/secretary.db","n":"跟 DSH 数据同级，不被工作区整理误动（02 D8）"},{"c":"表 schema_meta / app_state","n":"schemaVersion 禁写回退；app_state 存开关与上次发送（v13）"}],
+ "docs":["04 §2 表结构","02 D3 存储选型","04 §31 / §33 迁移 v11 / v12","04 §40 迁移 v13 app_state","04 §41 迁移 v14 workitems.model","04 §43 迁移 v16 source_session_id / notify"],"limit":"迁移不可逆：回滚代码后新表仍存在（但不影响旧版本运行）。"},
+
+"t-events":{"title":"events","short":"事件账本（append-only）","layer":"db","status":"done",
+ "what":"唯一真相源：所有状态变化的第一手记录，只追加不修改，重启按 seq 回放。",
+ "impl":[{"c":"seq / id / ts / type / actor / workitem_id / payload","n":"主键自增 seq；type 见 04 §4.4，只加不删"}],"docs":["04 §2 events","02 P1"],"limit":"长期需要归档策略（未做）。"},
+"t-workitems":{"title":"workitems","short":"任务（事件的投影）","layer":"db","status":"done",
+ "what":"任务表是事件投影，存当前状态与指标；状态以 events 为准，重建时可从事件还原。schema v16 起还记「这单从哪个 Relay 会话来的」和「要不要回灌」。",
+ "impl":[{"c":"status / kind / intent / priority / budget / parent_id","n":"状态机字段"},{"c":"workspace / origin / scope / scope_source / metrics","n":"v11/v12 新增工作区与任务来源；metrics 另存 item.metrics 事件防丢"},{"c":"model（v14）","n":"任务实际 / 指定的模型（provider/model）"},{"c":"source_session_id / notify（v16）","n":"来源 Relay 会话（回灌目标）与单任务回灌开关（默认 0）"}],"docs":["04 §2 workitems","04 §3 状态机","04 §31 / §33 / §41","04 §43 迁移 v16"]},
+"t-lanes":{"title":"lanes","short":"线：一个来源会话一个工人","layer":"db","status":"done",
+ "what":"记录每条线绑哪个工人会话、当前在跑哪单、空闲多久；看门狗据此回收会话与修复卡线。",
+ "impl":[{"c":"key / worker_session / status / idle_at","n":"key = session:<id>@<工作区>"}],"docs":["04 §23 v0.10","04 §31 工作区后缀"]},
+"t-memories":{"title":"memories","short":"记忆（事实 / 画像 / 纪事）","layer":"db","status":"done",
+ "what":"长期记忆：带来源、置信度、有效期与覆盖链；旧版本留痕但不注入。",
+ "impl":[{"c":"type / key / text / tags / source_event / confidence","n":"type = profile / fact / episode / artifact"},{"c":"valid_from / valid_to / superseded_by / deleted_at","n":"可纠正、可遗忘"},{"c":"memories_fts（FTS5）","n":"全文检索"}],"docs":["04 §2 memories","04 §22 记忆事件"]},
+"t-artifacts":{"title":"artifacts","short":"产物","layer":"db","status":"done",
+ "what":"任务产出的文件登记：路径、大小、sha256、属于哪个任务；finish 时落库，之后可从面板 / 交付链取。",
+ "impl":[{"c":"workitem_id / path / sha256 / size","n":"worker.finish 写入"}],"docs":["04 §18 v0.7 文件双向"]},
+"t-outbox":{"title":"outbox","short":"待投递队列","layer":"db","status":"done",
+ "what":"要给主人发的东西先排队：通道、对象、内容、附件、打扰等级、重试次数；ack 后才算送达。",
+ "impl":[{"c":"channel / peer / content / files / level / status","n":"level 来自 Reporter 决策"}],"docs":["04 §18","04 §19 处理方案 3"]},
+"t-tool-requests":{"title":"tool_requests","short":"工具申请与授权","layer":"db","status":"done",
+ "what":"工人申请名单外工具的记录：谁申请、为什么、要什么范围、谁批的（规则 / judge / 主人）、有效期多久。",
+ "impl":[{"c":"tool / reason / want_scope / status","n":"status：pending / allowed / denied / forbidden / escalated"},{"c":"decided_by / scope_granted / expires_at","n":"授权范围 once / lane / global"}],"docs":["08 §4 数据与审计","04 §28 v0.15"]},
+"t-judge-calls":{"title":"judge_calls","short":"每次裁判的审计","layer":"db","status":"done",
+ "what":"judge 每次调用的输入摘要、输出 JSON、耗时与模型；解析失败也记，便于回放与调参。",
+ "impl":[{"c":"kind / input_hash / output / ms / model","n":"kind=tool_decision 已接"}],"docs":["04 §29 M2"]},
+"t-sessions":{"title":"sessions","short":"会话（Relay / Worker）","layer":"db","status":"done",
+ "what":"会话绑定：谁（DSH sessionId）在为哪个线程 / 任务服务、什么角色、什么预设、是否还活着。",
+ "impl":[{"c":"id / role / preset / thread_id / workitem_id / status","n":"role = relay | worker"}],"docs":["04 §2 sessions","04 §23 线绑会话"]},
+"t-app-state":{"title":"app_state","short":"持久化开关（简报 / 上次发送）","layer":"db","status":"done",
+ "what":"v13 新增的 key / value 小表：存「跨重启要记住」的状态，例如简报开关（on / off）与上次发送时间，不用改配置文件。",
+ "impl":[{"c":"key / value / updated_at","n":"key 主键；值用文本存 JSON 或字符串"}],"docs":["04 §40 v0.26 schema v13"]},
+
+"review":{"title":"外部架构评审","short":"ARCH-REVIEW-GUIDE.md · 报告写 _review/","layer":"meta","status":"todo",
+ "what":"给外部评审模型（另一个 AI）的只读评审说明：硬性要求全量阅读所有文档 / 源码 / 测试 / 脚本、不许跳过，并逐文件出「阅读覆盖清单」；评审报告只写 _review/ARCH-REVIEW-REPORT.md，除此不动任何文件。要回答 12 个问题（职责边界、状态一致性、调度与生命周期、安全边界、可观测性、模型路由、数据迁移、扩展性、可测试性、部署升级、失败恢复、成本与体验），按 P0 / P1 / P2 分级并给出「文件:行号」证据。入口已写好，评审还没做。",
+ "impl":[{"c":"ARCH-REVIEW-GUIDE.md","n":"硬性要求 / 环境事实 / 完整文件清单 / 12 个评审问题 / 已知限制 / 报告格式"},{"c":"_review/ARCH-REVIEW-REPORT.md","n":"唯一允许写入的文件"},{"c":"node plugin/tests/run.mjs","n":"允许评审跑只读单测（148 个，全通过）"},{"c":"评审身份","n":"只读：不改文件、不部署、不清理、不装插件、不执行有副作用的命令"}],
+ "docs":["ARCH-REVIEW-GUIDE.md §0 硬性要求 / §5 评审问题","README 索引"],"limit":"评审是一次性外部输入，报告还没出；结论要主人过一遍再决定改哪些。",
+ "next":"等评审报告出来，按 P0 / P1 排优先级；先看职责边界（index.js 是否过大）与状态一致性。"},
+
+"cross":{"title":"跨机同步","short":"单写多读 · 密钥不入库","layer":"cross","status":"done",
+ "what":"家里 PC 是唯一写方：导出「记忆 + 人设」的加密快照推到私有 git 仓，办公机 pull 后幂等导入、只读使用。事件账本不跨机同步——不把 SQLite 当 git 数据库（D17）。",
+ "impl":[{"c":"tools/memory-sync.mjs","n":"export / import / push / pull"},{"c":"私仓 private-memory-repo","n":"只存密文快照与提交记录"},{"c":"deploy/deploy-go.sh","n":"办公机：备份 → 解包 → 重启 → 导入记忆 → 核对 schema"}],
+ "docs":["02 D17 记忆同步","04 §22 v0.9 私有仓同步","09 办公机更新流程"],"limit":"快照只含 memories + persona_overrides，不含事件账本与任务历史。"},
+
+"x-home":{"title":"家里 PC（主写）","short":"唯一可写的一台","layer":"cross","status":"done",
+ "what":"内核、SQLite、记忆都在这一台；它是唯一的写方，其余机器只读导入、不改账。",
+ "impl":[{"c":"DSH Host 常驻插件","n":"内核与数据库在这里常驻"}],"docs":["02 D17","04 §22"]},
+"x-snap":{"title":"加密快照 AES-256-GCM","short":"记忆 + 人设 → 一个密文文件","layer":"cross","status":"done",
+ "what":"把未删除、未被覆盖的记忆和人设导出成一个密文文件；密钥只在本机（密钥文件不入库、不进 git）。",
+ "impl":[{"c":"memory-sync.mjs","n":"aes-256-gcm + nonce，v1 格式；解密后再导入"},{"c":"deploy/memory-snapshot.enc","n":"办公机侧导入用快照"}],"docs":["04 §22","09 办公机更新流程"]},
+"x-repo":{"title":"私有 git 仓","short":"只存密文与提交记录","layer":"cross","status":"done",
+ "what":"加密快照放进私有 git 仓，只做版本与审计，不做实时同步；只有主写机 push（单写多读）。",
+ "impl":[{"c":"private-memory-repo","n":"私仓：密文快照 + 提交历史"}],"docs":["02 D17"],"limit":"git 里看不到明文，密钥丢失即无法恢复（密钥要单独备份）。"},
+"x-unit":{"title":"办公机（只读导入）","short":"pull 后幂等导入","layer":"cross","status":"done",
+ "what":"办公机 pull 到快照后本地导入：同 id 或同「owner + type + text」直接跳过，只加不重；导入后本地只读使用，面板 / 任务照常。",
+ "impl":[{"c":"memory-sync import","n":"幂等：实测 21 条 0 新增 / 21 跳过"},{"c":"deploy-go.sh","n":"解包新版 → 重启 dsh-web → 导入 → 核对 schema"}],"docs":["09 办公机更新流程","04 §22 实测"],"limit":"办公机的 GUI 会话仍归「未分组」（DSH 无 attach 接口）。"}
+},
+
+"layout":{
+"line":[
+ {"t":"card","id":"user","lines":["说需求 + 附件","拍板：只在高危","收结果：文本/文件","纠错：说一句就改"],"foot":{"c":"单租户","n":"表带 owner_id，多用户留缝（D14）"}},
+ {"t":"ar","l":["对话","反馈"]},
+ {"t":"card","id":"entry","items":["entry-in","entry-out"],"foot":{"c":"契约 EP1：ChannelAdapter","n":"收 / 发 / 能力位 / 健康"}},
+ {"t":"ar","l":["入站","回执"]},
+ {"t":"card","id":"relay","items":["relay-lane","relay-route","relay-scope","relay-context"],"mini":true},
+ {"t":"ar","l":["派单","回报"]},
+ {"t":"card","id":"kernel","grid":["k-events","k-fsm","k-sched","k-watchdog","k-async","k-notify","k-dedupe","k-wm","k-model","k-gov","k-judge","k-mem","k-persona","k-http","k-reporter","k-brief"]},
+ {"t":"ar","l":["派活","回报"]},
+ {"t":"card","id":"worker","items":["w-whitelist","w-boundary","w-stop","w-assets","w-request","w-perm","w-adopt","w-model","w-prompt","w-sniff","w-delguard"]}
+],
+"db":{"id":"db","chips":["t-events","t-workitems","t-lanes","t-memories","t-artifacts","t-outbox","t-tool-requests","t-judge-calls","t-sessions","t-app-state"],
+ "sub":"SQLite 单文件 · WAL · 事件只追加 · 重启可回放 · FTS5 检索","note":"唯一写者：内核",
+ "right":["workitems / lanes / sessions 都是事件的投影，可重建","迁移 v1–v16 · schema v16 · 记忆事件可审计"]},
+"pin":["review"],
+"cross":{"id":"cross","steps":["x-home","x-snap","x-repo","x-unit"],"arrows":["导出快照","提交密文","pull 导入"]}
+},
+
+"next":[
+{"tag":"模型","t":"DEV-001 模型效果记录表：任务 → 模型 → 效果","why":"现在能给工人指定模型，但「哪个模型擅长哪类活」还没有数据：一次任务用了哪个模型、多少 tokens、多久、有没有返工，账本里只记了模型名。","plan":"从 worker 会话的 assistant/message.usage（input / output tokens）+ workitems 账本 + 同文件短期返工检测攒数据；先在 /panel 或复盘报告里出「模型效果」区块，只记录不判断。","ref":"10-问题与待观察 DEV-001"},
+{"tag":"模型","t":"DEV-002 其他 provider 接入（GLM / Kimi 已验）","why":"DeepSeek 官方 / 账号、GLM（zai 7 个）、Kimi（moonshotai-cn 4 个）已接，共 15 个可路由；其余模型由主人先摸清各家 baseURL / 鉴权 / 协议。","plan":"DSH 侧加 provider 配置（密钥走 apiKeyEnv），秘书内核不用改；接进来后调 secretary_models 确认，再按任务类型试配。","ref":"11-模型接入与选择 §一 · 10 DEV-002"},
+{"tag":"模型","t":"DEV-003 成本单价表（用户自填）","why":"DSH 模型目录不含价格，只能用户自己维护单价；各家 usage 字段还不一样（GLM cacheRead、Kimi cacheWrite）。","plan":"配置里加每百万 token 单价（输入 / 输出 / 缓存分开），按任务与月份汇总；先依赖 DEV-001 的 token 统计。","ref":"10-问题与待观察 DEV-003 · 11 §五"},
+{"tag":"模型","t":"DEV-004 媒体工具路由（图片 / 视频 / 语音）","why":"媒体模型不是文本 Agent：不该塞进「工人模型」按 topic 选，而应作为工具 / provider 单独接。","plan":"按能力接成工具（图片生成 / 视频 / 语音），单独评估效果与成本，先不混进 workerModel。","ref":"10-问题与待观察 DEV-004"},
+{"tag":"观察","t":"ISS-001 工作流分线（focus 误伤）继续观察","why":"同一 relay 会话里说「让刚才那个人再检查一下」，因为任务文本里有绝对路径，focus 把 /工作日志 当成新工作流，结果起了新工人（2026-11-20 实例）。","plan":"先不改：用 lane.routed 攒 20+ 条样本 / 3–5 天，统计拆线率与误拆率；备选 A 默认粘住 + focus 只记诊断（推荐）、B focus 与 topic 都不同才拆、C 只保留显式 worker=new。","ref":"10-问题与待观察 ISS-001"},
+{"tag":"观察","t":"ISS-002 Relay 重复调用同一工具","why":"2026-11-20 20:31–20:33 relay 会话里出现「重复调用同一工具、参数相同」的系统提醒；结果没受影响，但浪费步骤。","plan":"下次看 relay 日志统计重复次数；若频繁，加节流或改等待方式（等结果而不是轮询）。","ref":"10-问题与待观察 ISS-002"},
+{"tag":"安全","t":"删除护栏：按任务累计删除数","why":"删除护栏 v0.22 上线、v0.23 修了 cd 解析：单条命令超过 50 个文件转审批，工作区外 / 根目录 / 通配直接拒。但阈值是按「单条命令」算的，多次小删除仍能绕过。","plan":"在 workitem 维度累计每次 file.deleted 的数量，超过阈值同样拦一次、转审批；补一条累计规则的单测。","ref":"04 §36 / §37 已知缺口"},
+{"tag":"安全","t":"附件入场快照 · 出站交付单","why":"外部通道里文字指令和附件不是同一条原子消息，可能出现「任务先派、附件后到」或源文件被移走。","plan":"附件路径复制到 attachments/<sha256> 后再进任务（inputs 只存内核副本）；outbox 每条带 files[{path,sha256}]，文本与文件分开 ack、分开重试。","ref":"04 §19 处理方案 1 / 3"},
+{"tag":"平台依赖","t":"GUI 会话挂到工作区","why":"任务工作区（v0.18）已让工人落到指定目录，但会话在 GUI 里仍归「未分组」——DSH 目前没有公开的 workspace attach 接口。","plan":"等 DSH 平台支持；期间可以做的变通：按 @工作区 后缀归档 / 在面板里按工作区分组，减少找会话的成本。","ref":"04 §31 遗留"},
+{"tag":"体验","t":"语言服务：先灰度再默认开","why":"语言服务骨架已接在 outbox 之前（只改写、不加事实，失败回退原文），但 language.enabled 默认 false，现在发出去的是工人原文。","plan":"先在直连通道（GUI / HTTP）样本上观察：改写是否引事实、是否超时；稳定后按通道灰度到默认开启。","ref":"04 §32 语言服务骨架"},
+{"tag":"质量","t":"候选文件过滤：排除本任务产物","why":"文件嗅探会在白名单目录里按词重合度找候选，可能把上次生成的产物（如 示例提交/*.docx）当输入又读一遍。","plan":"注入候选时排除本任务 / 本线已产出的路径（artifacts 表），并给候选加「本任务产物」标记。","ref":"04 §34 已知小问题"},
+{"tag":"自动化","t":"归档：确认候选后打开 allowApply 试点","why":"归档已上线但默认只提议不移动（allowApply=false）：每小时扫 watchDirs，按扩展名规则挑 24h 以上的文件出候选。候选质量还没让主人确认过。","plan":"先让主人看几轮候选清单，确认规则准确后再打开试点（限定 watchDirs 与规则），移动留日志、可回滚。","ref":"04 §40 v0.26 归档"},
+{"tag":"兼容","t":"旧会话 seed：超 500 条怎么办","why":"seed 模式把老会话历史复制进新工人会话，上限 seedMaxEvents=500 条，超大会话目前直接拒绝。","plan":"三个候选方向：只带最近 N 轮 + 摘要、分帧流式读取后压缩、或按「只带与本任务相关片段」检索式注入。","ref":"04 §26 v0.13 seed 上限"},
+{"tag":"入口","t":"微信 / PWA 入口待接入","why":"入口适配只做了 GUI 与 HTTP；微信受设备风控影响（旧的原型因此暂停），PWA 还没开始。","plan":"先做 ChannelAdapter 的第二个实现（mock → PWA，鉴权复用进程 token）；微信等风控条件具备再接，接之前先把 IM 投递端点限定 loopback。","ref":"02 D1 主入口顺序 · 06 入口契约 · 01 现状盘点"},
+{"tag":"安全","t":"取消要能真正中断工人（abort 接口）","why":"取消现在只拦「下一次工具调用」：事故里工人 A 被取消后还继续跑了 5 分钟、提权改 hosts，最后 work_finish 被状态机拒绝才发现任务已取消。正在进行的模型生成或单条长命令拦不住。","plan":"等 DSH agent 层提供 abort / cancel 接口后接上：取消即停生成、杀当前命令；在那之前，取消先给工人发「立即停止」，再靠下一次调用守卫兜底，并把这个缺口写进验收清单。","ref":"04 §21.1 遗留 · src/protected.js"},
+{"tag":"观察","t":"异步派单后的任务依赖（T1 完成再派 T2）","why":"异步之后 Relay 回完「已派出」就结束这一轮：真实双工人任务里 T1 完成 19:38:44，T2 却是 19:42:36 主人再推一句才派——依赖关系没有进账本。","plan":"两个候选：create_task 支持 depends_on（父任务 done 才放行 queued），或主人在场时让 Relay 显式 wait；先用几天样本看「后一单依赖前一单」的占比再定。","ref":"04 §43 异步派单 · WORKLOG 2026-11-23 19:36–19:46"},
+{"tag":"观察","t":"派单去重阈值会不会误合并","why":"去重是纯规则：同工作区 + 文本相似度 ≥0.85 就复用旧单（短于 12 字不判）。「差不多但确实不一样」的需求会被并到在办任务上，只在返回值里说 reused，没有二次确认。","plan":"攒样本统计 reused 命中率与误合并率（复用后主人又 force 重派的次数）；误伤多就提高阈值，或改成「先建议复用、让 Relay 问一句再定」。","ref":"src/dedupe.js · plugin/tests/unit/dedupe.test.mjs"},
+{"tag":"兼容","t":"provider 角色 / 参数兼容位（qwen 已修）","why":"各家 provider 对角色名和参数的支持不一致：qwen 不接受 developer 角色（compat.supportsDeveloperRole=false 才不 400），GLM 的思考参数是 thinking:{type}，通义万相只能传 size+duration。每接一家都可能踩新的兼容坑。","plan":"把已知兼容位整理成 provider → compat 映射表（写进 11 号文档）；新接 provider 先跑「最小任务冒烟 + 400 检查」。这些都在 DSH profile，不进秘书内核。","ref":"11-模型接入与选择 · WORKLOG 2026-11-23 20:28–20:53"},
+{"tag":"评审","t":"外部架构评审（等报告）","why":"index.js 约 95KB、迁移已到 v16、单测 148 个，职责与状态一致性需要外部视角；评审指南要求全量读文档 / 源码 / 测试，回答 12 个问题并按 P0 / P1 / P2 给证据。","plan":"把 ARCH-REVIEW-GUIDE.md 交给外部评审模型（只读），报告落 _review/ARCH-REVIEW-REPORT.md；出来后按 P0 / P1 排期，先看职责边界与状态一致性。","ref":"ARCH-REVIEW-GUIDE.md"}
+],
+"paused":["打印 / 扫描：物理设备，先放一放","多用户：只留 owner_id 缝（D14）","情绪层：v0 不加（D16）","自动选模型：接口留好了（workerModelAuto.enabled=false），等 DEV-001 有数据再定策略"]
+}/*DATA_END*/;
+
+/* ============================================================
+   渲染与交互
+   ============================================================ */
+(function(){
+  "use strict";
+  var N = DATA.nodes;
+  var ST = DATA.status;
+  var $ = function(s, r){ return (r||document).querySelector(s); };
+  var el = function(tag, cls, txt){
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (txt != null) n.textContent = txt;
+    return n;
+  };
+  var esc = function(s){ return String(s == null ? "" : s).replace(/[&<>"]/g, function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c];
+  }); };
+  var statusOf = function(id){ var n = N[id]; return (n && n.status) || "design"; };
+  var badgeHTML = function(id){
+    var s = statusOf(id);
+    return '<span class="badge s-' + s + '">' + ST[s] + '</span>';
+  };
+
+  /* ---------- 卡片 ---------- */
+  function cardHead(id){
+    var n = N[id];
+    var h = el("button", "cardhead");
+    h.dataset.node = id;
+    h.innerHTML = '<span><h2>' + esc(n.title) + '</h2>' + badgeHTML(id) + '</span>';
+    return h;
+  }
+
+  function buildCard(id, opts){
+    opts = opts || {};
+    var n = N[id];
+    var card = el("section", "card c-" + n.layer);
+    card.dataset.card = id;
+    card.dataset.node = id;
+    card.tabIndex = 0;
+    card.setAttribute("role", "group");
+    card.setAttribute("aria-label", n.title + "（点击查看详情）");
+
+    var head = el("div", "cardhead");
+    head.innerHTML = '<span class="t"><h2>' + esc(n.title) + '</h2></span>' + badgeHTML(id);
+    card.appendChild(head);
+    var sub = el("p", "sub", n.short);
+    card.appendChild(sub);
+
+    if (opts.items && opts.items.length){
+      var ul = el("ul", "items");
+      opts.items.forEach(function(cid){
+        var c = N[cid];
+        var li = el("li");
+        var b = el("button", "item");
+        b.dataset.node = cid;
+        b.innerHTML = '<span class="bul">·</span><span><b>' + esc(c.title) + '</b><span class="d">' + esc(c.short) + '</span></span>';
+        li.appendChild(b);
+        ul.appendChild(li);
+      });
+      card.appendChild(ul);
+    }
+    if (opts.lines && opts.lines.length){
+      var pw = el("div", "plainwrap");
+      opts.lines.forEach(function(t){
+        var row = el("div", "plain");
+        row.innerHTML = '<span class="bul">·</span><span>' + esc(t) + '</span>';
+        pw.appendChild(row);
+      });
+      card.appendChild(pw);
+    }
+    if (opts.foot){
+      var ft = el("div", "foot");
+      ft.innerHTML = '<b>' + esc(opts.foot.c) + '</b><span>' + esc(opts.foot.n) + '</span>';
+      card.appendChild(ft);
+    }
+    if (opts.mini){
+      var m = el("div", "mini");
+      m.innerHTML = '<div class="cap">两条线并行，各自串行</div>' +
+        '<div class="lane"><span class="lname">线 A</span><i>1</i><s>▸</s><i>2</i><s>▸</s><i>3</i></div>' +
+        '<div class="lane"><span class="lname">线 B</span><i>1</i><s>▸</s><i>2</i></div>';
+      card.appendChild(m);
+    }
+    if (opts.grid && opts.grid.length){
+      var g = el("div", "kgrid");
+      opts.grid.forEach(function(cid){
+        var c = N[cid];
+        var b = el("button", "kn" + (c.wide ? " wide" : ""));
+        b.dataset.node = cid;
+        b.innerHTML = '<b>' + esc(c.title) + '</b><span>' + esc(c.short) + '</span>';
+        g.appendChild(b);
+      });
+      card.appendChild(g);
+    }
+    return card;
+  }
+
+  function buildArrow(labels, idx){
+    var a = el("div", "ar");
+    a.dataset.a = String(idx);
+    a.innerHTML = '<span class="lab">' + esc(labels[0]) + '</span><span class="b1"></span><span class="b2"></span><span class="lab">' + esc(labels[1]) + '</span>';
+    return a;
+  }
+
+  function buildVconn(labels, idx){
+    var d = el("div", "vconn");
+    d.dataset.a = String(idx);
+    d.innerHTML = '<span class="vl">' + esc(labels[0]) + '</span><span class="vc"></span><span class="vl">' + esc(labels[1]) + '</span>';
+    return d;
+  }
+
+  function renderLine(){
+    var line = $("#line");
+    var arIdx = 0;
+    var structure = DATA.layout.line;
+    var pendingV = [];
+    structure.forEach(function(item){
+      if (item.t === "card"){
+        line.appendChild(buildCard(item.id, item));
+      } else if (item.t === "ar"){
+        arIdx++;
+        line.appendChild(buildArrow(item.l, arIdx));
+        pendingV.push({labels:item.l, idx:arIdx});
+      }
+    });
+    /* 窄屏用的竖向连接符（在 CSS 里按 grid-area 摆位） */
+    var v3 = buildVconn(pendingV[2].labels, 3);
+    var v4 = buildVconn(pendingV[3].labels, 4);
+    line.appendChild(v3);
+    line.appendChild(v4);
+  }
+
+  /* ---------- 区块：数据库 / 跨机 ---------- */
+  function buildBands(){
+    var host = $("#bands");
+    var db = DATA.layout.db, cr = DATA.layout.cross;
+
+    var b1 = el("section", "band c-db");
+    b1.dataset.band = "db";
+    b1.dataset.node = db.id;
+    b1.innerHTML = '<div class="bandhead"><h2>' + esc(N[db.id].title) + '（唯一真相源）</h2>' + badgeHTML(db.id) +
+      '<span class="right">' + esc(db.note) + '</span></div>' +
+      '<p class="dbsub">' + esc(db.sub) + '</p>';
+    var chips = el("div", "chips");
+    db.chips.forEach(function(cid){
+      var c = el("button", "chip");
+      c.dataset.node = cid;
+      c.title = N[cid].short;
+      c.textContent = cid.replace(/^t-/, "").replace(/-/g, "_");
+      chips.appendChild(c);
+    });
+    b1.appendChild(chips);
+    var r = el("p", "dbsub");
+    r.style.marginTop = "8px";
+    r.style.fontSize = "11.8px";
+    r.style.color = "#8a93a5";
+    r.textContent = db.right.join(" · ");
+    b1.appendChild(r);
+    host.appendChild(b1);
+
+    var b2 = el("section", "band c-cross");
+    b2.dataset.node = cr.id;
+    b2.innerHTML = '<div class="bandhead"><h2>' + esc(N[cr.id].title) + '（新增）</h2>' + badgeHTML(cr.id) +
+      '<span class="right">办公机永不反向写 · 快照与导入都幂等</span></div>';
+    var steps = el("div", "steps");
+    cr.steps.forEach(function(sid, i){
+      var s = N[sid];
+      var st = el("button", "step");
+      st.dataset.node = sid;
+      st.innerHTML = '<b>' + esc(s.title) + '</b><span>' + esc(s.short) + '</span>';
+      steps.appendChild(st);
+      if (i < cr.arrows.length){
+        var sa = el("div", "sar");
+        sa.innerHTML = '<span class="sl">' + esc(cr.arrows[i]) + '</span><span class="sb"></span>';
+        steps.appendChild(sa);
+      }
+    });
+    b2.appendChild(steps);
+    host.appendChild(b2);
+  }
+
+  /* ---------- 角落钉（图外入口，如评审指南） ---------- */
+  function renderPins(){
+    var box = $("#pins");
+    (DATA.layout.pin || []).forEach(function(id){
+      var n = N[id];
+      if (!n) return;
+      var b = el("button", "chip");
+      b.dataset.node = id;
+      b.title = n.title + "（只读说明）";
+      b.textContent = n.title + " · ARCH-REVIEW-GUIDE.md";
+      box.appendChild(b);
+    });
+  }
+
+  /* ---------- 详情 ---------- */
+  var detail = $("#detail"), scrim = $("#scrim"), dbody = $("#dbody");
+  var current = null;
+
+  function closeDetail(){
+    detail.classList.remove("open");
+    scrim.classList.remove("open");
+    document.querySelectorAll(".sel").forEach(function(n){ n.classList.remove("sel"); });
+    markArrows(null);
+    current = null;
+    if (location.hash) history.replaceState(null, "", location.pathname + location.search);
+  }
+
+  function markArrows(cardId){
+    var ars = [].slice.call(document.querySelectorAll("#line .ar"));
+    ars.forEach(function(a){ a.classList.remove("lit"); });
+    document.querySelectorAll("#line .vconn").forEach(function(v){ v.classList.remove("lit"); });
+    if (!cardId) return;
+    var cards = [].slice.call(document.querySelectorAll("#line .card"));
+    var i = cards.findIndex(function(c){ return c.dataset.card === cardId; });
+    if (i < 0) return;
+    if (ars[i - 1]) ars[i - 1].classList.add("lit");
+    if (ars[i]) ars[i].classList.add("lit");
+    /* 窄屏时用的竖向连接符：relay↔kernel 一条、kernel↔worker 一条 */
+    if (cardId === "relay" || cardId === "kernel"){
+      var v3 = document.querySelector('#line .vconn[data-a="3"]');
+      if (v3) v3.classList.add("lit");
+    }
+    if (cardId === "kernel" || cardId === "worker"){
+      var v4 = document.querySelector('#line .vconn[data-a="4"]');
+      if (v4) v4.classList.add("lit");
+    }
+  }
+
+  function openNode(id){
+    var n = N[id];
+    if (!n) return;
+    current = id;
+    document.querySelectorAll(".sel").forEach(function(x){ x.classList.remove("sel"); });
+    document.querySelectorAll('[data-node="' + id + '"]').forEach(function(x){ x.classList.add("sel"); });
+    var selfEl = document.querySelector('[data-node="' + id + '"]');
+    var card = selfEl && selfEl.closest ? selfEl.closest(".card") : null;
+    markArrows(card ? card.dataset.card : null);
+
+    var html = '<div class="dlayer">' + esc(DATA.layers[n.layer] || "") + '</div>';
+    html += '<h2 class="dtitle">' + esc(n.title) + ' ' + badgeHTML(id) + '</h2>';
+    html += '<p class="dwhat">' + esc(n.what) + '</p>';
+    html += '<div class="dsec">关键实现</div><ul class="impl">';
+    (n.impl || []).forEach(function(it){
+      html += '<li><code>' + esc(it.c) + '</code><p>' + esc(it.n) + '</p></li>';
+    });
+    html += '</ul>';
+    if (n.limit) html += '<div class="dsec">已知限制</div><p class="note warn">' + esc(n.limit) + '</p>';
+    if (n.next) html += '<div class="dsec">下一步</div><p class="note next">' + esc(n.next) + '</p>';
+    html += '<div class="dsec">相关文档</div><div class="docs">' +
+      (n.docs || []).map(function(d){ return '<span>' + esc(d) + '</span>'; }).join("") + '</div>';
+    if (n.layer === "db") html += '<div class="dsec">其它表</div><p class="note">threads / item_members / merge_members / approvals / channel_health / channel_policies / persona_overrides / schema_meta</p>';
+    dbody.innerHTML = html;
+    dbody.scrollTop = 0;
+    detail.classList.add("open");
+    scrim.classList.add("open");
+    history.replaceState(null, "", "#" + encodeURIComponent(id));
+  }
+
+  /* ---------- 下一步计划 ---------- */
+  function renderNext(){
+    var box = $("#nextList");
+    DATA.next.forEach(function(it, i){
+      var c = el("article", "nextcard");
+      var t2 = /平台|入口|评审/.test(it.tag);
+      var t3 = /兼容|质量|自动化|成本|模型/.test(it.tag);
+      c.innerHTML = '<span class="tag' + (t2 ? " t2" : t3 ? " t3" : "") + '">' + esc(it.tag) + '</span>' +
+        '<span style="font-size:11.5px;color:#9aa3b2">待做 · ' + (i + 1) + '</span>' +
+        '<h3>' + esc(it.t) + '</h3>' +
+        '<p><b style="color:#39404f">为什么</b>：' + esc(it.why) + '</p>' +
+        '<div class="plan"><b>打算怎么做</b>：' + esc(it.plan) + '</div>' +
+        '<div class="ref">依据：' + esc(it.ref) + '</div>';
+      box.appendChild(c);
+    });
+    if (DATA.paused && DATA.paused.length){
+      var p = el("div", "paused");
+      p.innerHTML = '<b>暂缓（先不做）</b><br>' + DATA.paused.map(function(x){
+        return '<span>· ' + esc(x) + '</span>';
+      }).join("");
+      box.parentNode.insertBefore(p, box.nextSibling);
+    }
+    $("#nextCnt").textContent = DATA.next.length;
+  }
+
+  /* ---------- 空态 ---------- */
+  function renderEmpty(){
+    var cnt = {done:0, partial:0, todo:0, design:0};
+    Object.keys(N).forEach(function(k){ var s = N[k].status; if (cnt[s] != null) cnt[s]++; });
+    dbody.innerHTML = '<div class="empty"><b>点一个模块开始</b>' +
+      '图上每个卡片、小格、表名、跨机步骤都能点。<br>详情里会写：它是什么、关键实现在哪、做到哪、下一步。' +
+      '<div class="counts"><span>' + ST.done + ' ' + cnt.done + '</span><span>' + ST.partial + ' ' + cnt.partial + '</span>' +
+      '<span>' + ST.todo + ' ' + cnt.todo + '</span><span>' + ST.design + ' ' + cnt.design + '</span></div></div>';
+  }
+
+  /* ---------- 事件 ---------- */
+  function activateTab(name){
+    document.querySelectorAll(".tab-btn").forEach(function(x){
+      var on = x.dataset.tab === name;
+      x.classList.toggle("active", on);
+      x.setAttribute("aria-selected", on ? "true" : "false");
+    });
+    document.querySelectorAll(".tabpane").forEach(function(p){
+      p.classList.toggle("active", p.id === "pane-" + name);
+    });
+    closeDetail();
+  }
+
+  function bind(){
+    document.addEventListener("click", function(e){
+      var nodeEl = e.target.closest("[data-node]");
+      if (nodeEl){
+        openNode(nodeEl.dataset.node);
+        return;
+      }
+      if (e.target.closest("#dclose") || e.target.id === "scrim"){
+        closeDetail();
+        return;
+      }
+      if (e.target.closest(".bar") || e.target.closest(".panel") || e.target.closest(".top") ){
+        /* 点在空白（非节点）上：收起 */
+        if (!e.target.closest("[data-node]") && !e.target.closest(".tab-btn")) closeDetail();
+      }
+    });
+    document.addEventListener("keydown", function(e){
+      if (e.key === "Escape") closeDetail();
+      if ((e.key === "Enter" || e.key === " ") && e.target.classList && e.target.classList.contains("card")){
+        e.preventDefault();
+        openNode(e.target.dataset.card);
+      }
+    });
+    document.querySelectorAll(".tab-btn").forEach(function(b){
+      b.addEventListener("click", function(){
+        activateTab(b.dataset.tab);
+        window.scrollTo({top:0, behavior:"smooth"});
+      });
+    });
+  }
+
+  /* ---------- 启动 ---------- */
+  renderLine();
+  buildBands();
+  renderPins();
+  renderNext();
+  renderEmpty();
+  bind();
+
+  /* 深链：#next 打开下一步计划；#node-id 直接打开某节点 */
+  function applyHash(){
+    var hash = decodeURIComponent((location.hash || "").replace(/^#/, ""));
+    if (hash === "next"){ activateTab("next"); }
+    else if (hash && N[hash]){ openNode(hash); }
+  }
+  applyHash();
+  window.addEventListener("hashchange", applyHash);
+})();
+</script>
+</body>
+</html>

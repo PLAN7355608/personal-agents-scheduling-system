@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Personal agent secretary",
+    "description": "Turns a request into a tracked WorkItem, dispatches a Worker session, and records results in a durable ledger; ships Relay and Worker presets plus read-only status endpoints. v0 targets the DSH GUI only."
+  }
+}

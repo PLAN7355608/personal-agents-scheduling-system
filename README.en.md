@@ -1,0 +1,116 @@
+# PASS — Personal Agents Scheduling System
+
+> **Warning**
+>
+> This is an **experimental, personal-use project under active development**. It is provided **as is**, without warranty of any kind. On a real machine it dispatches workers that **read/write files and run shell commands** — use at your own risk.
+>
+> This is a **sanitized distribution**: it contains **no personal data, no memory database, no credentials, no machine-specific paths or private deployment scripts**.
+
+PASS is a personal agent scheduling system built as a plugin for [DeepSeek Harness (DSH)](https://github.com/deepseek-ai). What you say in passing becomes an **auditable task**, executed by a dedicated “worker” agent, and the result comes back to you.
+
+It is not a chatbot — it is a **scheduler**: the model does the thinking, while a code kernel guarantees *nothing is lost, nothing oversteps, everything is traceable*.
+
+- **English docs**: this page · [中文](README.md)
+- **Architecture diagram**: open [`assets/arch-v0.4.html`](assets/arch-v0.4.html) in a browser (interactive, clickable nodes)
+- **Architecture notes**: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+
+---
+
+## What it solves
+
+Large models are smart but forgetful: close the conversation and task state is gone; let them act directly and they may overstep.
+
+PASS separates **talking** from **doing**:
+
+1. **Relay** — listens to you, turns requests into tasks; it only creates tasks and reports, never does heavy work;
+2. **Kernel (code)** — SQLite event ledger + state machine; tasks survive restarts, every step is auditable;
+3. **Worker** — every task runs in its own session with its own tool allowlist, permission preset and approval policy;
+4. **Lane** — one source, one lane; serial within a lane, parallel across lanes;
+5. **Panel** — a floating pill shows running / needs-a-human / done, and lets you approve or reject tool requests directly.
+
+## Highlights
+
+| Capability | Description |
+|---|---|
+| Event ledger | Append-only events are the single source of truth; projections are rebuildable; schema migrations only move forward |
+| Task state machine | `intake → triaged → queued → running → done/failed/blocked/cancelled`, illegal transitions rejected |
+| Multi-lane execution | Serial within a source, parallel across sources; idle worker sessions are unloaded and reused, not replaced |
+| Multi-model | Per-task `provider/model`; add new models without touching the kernel |
+| Tool governance | Worker allowlist → rule/judge → owner approval; system boundaries (hosts, system dirs, elevation commands) always require explicit approval |
+| Deletion guard | Deletion commands are scoped, size-capped, escalated when large, and fully audited |
+| Async dispatch | Task creation returns immediately; results can be delivered back to the source session (`guiNotify`, off by default) |
+| Ledger side effects | Briefings, retrospectives, archiving (proposal-only by default), templates, memory, persona |
+
+## Architecture at a glance
+
+```
+You (GUI / IM)
+   │ talk
+   ▼
+Relay session (listens, creates tasks only)
+   │ secretary_create_task (async by default)
+   ▼
+Kernel (Host plugin)
+   ├─ SQLite event ledger + WorkItem state machine
+   ├─ Lane routing: one source → one lane; serial in lane, parallel across lanes
+   ├─ Dispatch: create/resume one worker session per lane
+   └─ Watchdog: timeout by latest activity, reclaim stuck lanes
+   │
+   ▼
+Worker session (isolated tools + allowlist + approvals)
+   ├─ read / write / shell / search / Office / image…
+   ├─ system boundary (system dirs, elevation, hosts) → must request
+   └─ finish → work_finish → ledger → panel / notify back
+```
+
+See [`assets/arch-v0.4.html`](assets/arch-v0.4.html) for the full node graph.
+
+## Install
+
+Requirements: a working **DeepSeek Harness (DSH)** installation (host-plugin mechanism and `cordis.patch.yml`).
+
+1. Register `plugin/` as a local plugin in your DSH profile:
+   ```powershell
+   # Windows example: link the plugin into the profile's node_modules
+   cmd /c mklink /J "%USERPROFILE%\.dsh\profiles\desktop\node_modules\dsh-secretary-core" "E:\path\to\PASS\plugin"
+   ```
+   On Linux / macOS use `ln -s`.
+2. Enable `dsh-secretary-core` in your DSH profile (plugin id: `secretary-core`, bundle name: `dsh-secretary-core`).
+3. Restart DSH and check that the secretary pill appears in the bottom-right corner.
+
+> `plugin/cordis.patch.yml` ships a working Relay / Worker preset set and defaults; adjust `workspaceRoot` and other paths for your machine.
+
+## Quick start
+
+Just talk in a session where the secretary is enabled (Relay creates the task for you), or call tools explicitly:
+
+- `secretary_create_task` — create a task (async by default, returns immediately)
+- `secretary_status` / `secretary_wait` — check progress / wait when you really need the result
+- `secretary_tool_requests` + `secretary_decide_tool_request` — handle worker tool requests (also available as panel buttons)
+- `secretary_models` — list routable models
+- `secretary_prune` / `secretary_report` / `secretary_briefing` — cleanup, retrospectives, briefings
+
+## Layout
+
+```
+plugin/                 # DSH host plugin (kernel)
+  index.js              # tools, HTTP, timers, guards
+  client.js             # floating panel (pill)
+  src/                  # state machine, DB, dispatch, guards, judge, ledger…
+  tests/                # unit tests (node:test, run in-process)
+  cordis.patch.yml      # Relay / Worker presets and defaults
+assets/arch-v0.4.html   # interactive architecture diagram
+docs/ARCHITECTURE.md    # architecture notes
+```
+
+## Status & limits
+
+- **v0.x**: schema 16, unit tests 148/148 (`node plugin/tests/run.mjs`);
+- Designed for **single machine, single user** for now; multi-machine / multi-user boundaries are not implemented yet;
+- Cancellation only stops a worker at its **next tool call**; it cannot interrupt an in-flight command or model generation (needs an abort API from DSH);
+- Auto model selection is reserved but disabled (`workerModelAuto.enabled=false`);
+- Language service and some hardware tools (printer/scanner) are off by default.
+
+## License
+
+[MIT](LICENSE)

@@ -1,0 +1,12 @@
+node_modules/
+*.log
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+Thumbs.db
+.env
+*.key
+*.pem
+local/
+backups/

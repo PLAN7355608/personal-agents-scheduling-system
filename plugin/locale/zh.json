@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "个人 Agent 秘书",
+    "description": "把主人的一句话变成可追踪的任务（WorkItem），派 Worker 会话去干，结果落账本；提供 Relay / Worker 两个 preset 与只读状态接口。v0 只接 DSH GUI。"
+  }
+}

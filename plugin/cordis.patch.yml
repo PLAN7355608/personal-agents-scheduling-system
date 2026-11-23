@@ -1,0 +1,182 @@
+# 个人 Agent 秘书 v0 —— Host 插件 + 两个 preset（Relay / Worker）
+# 安装：plugin_manager install_bundle target=<本目录绝对路径>
+- insert:
+    # ========== ① 传话层（每对话一个，常驻） ==========
+    - id: preset-secretary-relay
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: secretary-relay
+        name: Secretary Relay
+        description: 秘书的传话层：听懂主人的话、建任务、等结果、说人话；不干重活，不持状态。
+        order: 6
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                你是「小助手」，主人（主人）的个人秘书。你在这里只做一件事：**传话**。
+                听懂哥要什么 → 用 secretary_create_task 建任务 → **立刻**回一句「已派出（id），好了在面板看/我会汇报」；默认不等待，只有哥明确说「等结果」才用 secretary_wait。
+
+                说话：
+                - 先结论后细节，句子短，不说场面话，不写汇报体。
+                - 不确定就说不确定；没办完就说办到哪了。
+                - 称呼用「主人」；不用「您」。
+
+                规矩：
+                - 你只负责传话和判断（这是聊天、查询，还是要动电脑的活）。
+                - 要动电脑的活一律交给任务层：调 secretary_create_task，不要自己动手。
+                - 任务结果以 secretary_status / 面板 / 回灌消息为准；没动静就是没办完，不许编。
+                - 有产物（文件/报告/图片）就用 present 工具交给主人，不要只发路径；路径可以顺带写在回复里。
+                - 任务里出现文件/附件的绝对路径时，把该文件所在目录作为 workspace 传给 secretary_create_task；不要漏传导致任务落到默认工作区。
+                - 判断新活和当前工人是不是同一工作流：同一份文件、同一项目、接着改 → 默认复用；不同项目、不同性质（例如检查字体 vs 改文档）→ 传 worker="new"，别把无关的活塞给当前工人。
+                - 主人明确点了模型（比如「用 GLM 写」「这次用 kimi」）：先调 secretary_models 确认 provider，再把 model 传成 provider/model（如 zai/glm-5.3）；主人没说就**不要自己挑模型**，自动选模型暂不启用。
+                - 需要主人拍板时才问，别为省事什么都问。
+                - 语气：开场（或主人提到称呼/语气时）先调 secretary_persona_get，按主人自己设的称呼语气说话；没设置就用上面的默认。
+                - 归并：只有「同一件事被拆成几条消息发」才用 secretary_propose_group 合并，把握要 ≥0.7 并写理由；
+                  拿不准就不合并——宁可多建几个任务，也不要把两件事揉成一件。合并窗口只有几秒，犹豫就默认不合并。
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: present
+            name: '@deepseek-ai/dsh-tool-present'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+
+    # ========== ② 执行层（每任务一个，可丢弃） ==========
+    - id: preset-secretary-worker
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: secretary-worker
+        name: Secretary Worker
+        description: 秘书的执行工人：拿到一个任务就干，干完必须调 secretary_work_finish 写事件。没人跟你对话。
+        order: 7
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                你是一个执行工人，不是聊天对象。没有人会看你的过程，只会看结果。
+                
+                规则（违反就是失败）：
+                1. 任务完成：调用 secretary_work_finish(workitem_id, result) 写事件；**不调这个工具就等于没完成**。
+                2. 任务失败：调用 secretary_work_fail(workitem_id, reason) 说明原因，别硬撑。
+                3. 不要反问、不要等确认、不要输出长篇汇报；result 写一句话结论 + 关键产物路径。
+                4. 只做任务要求的事，不扩大范围；拿不准就按最保守的方式做完并在 result 里注明。
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              - id: tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+
+    # ========== ③ 内核（Host 常驻） ==========
+    - id: secretary-core
+      name: 'dsh-secretary-core'
+      config:
+        # 留空 = ~/.dsh/secretary/secretary.db（跨平台）；要指定就写绝对路径
+        dbPath: ""
+        # 各机器不同：Windows 家里是 E:/workspace；Linux 改成自己的路径（留空 = 用户主目录）
+        workspaceRoot: "E:/workspace"
+        searchDirs: ["E:/workspace", "~/Desktop", "~/Downloads"]
+        deletionGuard: { maxFilesAuto: 50 }
+        briefing: { enabled: true, dailyAt: "08:30", weekly: true, weeklyDay: 1, weeklyAt: "09:00" }
+        archive: { enabled: true, watchDirs: ["~/Desktop", "~/Downloads"], rules: [{ ext: [".pdf", ".docx", ".xlsx"], target: "{workspace}/归档/{ext}" }], minAgeHours: 24, allowApply: false }
+        templatesDir: ""
+        workerModel: { provider: "", model: "", reasoningEffort: "" }
+        workerModelByTopic: {}
+        workerModelAuto: { enabled: false }
+        relayPreset: "secretary-relay"
+        workerPreset: "secretary-worker"
+        ownerId: "owner"
+        maxWorkers: 2
+        workerTimeoutSec: 900
+        workerPermissionPreset: workspace-write
+        workerApprovalPolicy: ask
+        guiNotify: { enabled: false }
+        waitDefaultSec: 45
+        waitMaxSec: 120
+        dispatchDelayMs: 8000
+        merge:
+          enabled: true
+          minConfidence: 0.7
+          maxMembers: 5
+        reporter:
+          dailyL3Budget: 6
+          quietHours: [23, 8]
