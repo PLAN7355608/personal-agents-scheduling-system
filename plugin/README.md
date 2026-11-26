@@ -1,11 +1,11 @@
 # dsh-secretary-core
 
-个人 Agent 秘书 v0 内核（DSH 插件）：WorkItem 状态机 + 事件账本 + 线路由/派单 + 工具治理 + 面板（工具申请可在面板批准/拒绝）；附 `secretary-relay` / `secretary-worker` 两个 preset。
+个人 Agent 秘书 v0 内核（DSH 插件）：WorkItem 状态机 + 事件账本 + 线路由/派单 + 工具治理 + 只读面板；附 `secretary-relay` / `secretary-worker` 两个 preset。
 
 ## 组成
 
 - **内核（Host 插件）**：`index.js` + `src/`
-  - 账本：SQLite（`~/.dsh/secretary/secretary.db`），append-only 事件为唯一真相源，schema v16；
+  - 账本：SQLite（`~/.dsh/secretary/secretary.db`），append-only 事件为唯一真相源，schema v14；
   - 状态机：`intake → triaged → queued → running → done/failed/blocked/cancelled`；
   - 线路由：一个来源会话一条线（可带工作区/文件焦点后缀），线内串行、线间并行；
   - 派单：每条线复用/恢复同一个工人会话；支持任务级指定模型；

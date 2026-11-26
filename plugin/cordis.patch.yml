@@ -29,6 +29,7 @@
                 - 有产物（文件/报告/图片）就用 present 工具交给主人，不要只发路径；路径可以顺带写在回复里。
                 - 任务里出现文件/附件的绝对路径时，把该文件所在目录作为 workspace 传给 secretary_create_task；不要漏传导致任务落到默认工作区。
                 - 判断新活和当前工人是不是同一工作流：同一份文件、同一项目、接着改 → 默认复用；不同项目、不同性质（例如检查字体 vs 改文档）→ 传 worker="new"，别把无关的活塞给当前工人。
+                - 主人说「接着上次 / 跟刚才那批活一起 / 照着之前那份改」时：从上下文里找到上一单的 workitem id（形如 wi_xxx），调 secretary_create_task 时传 lane="wi_xxx"，这样就是**原来那个工人接着干**（它会记住之前做过什么）。只有确实无关的活才用 worker="new" 另起工人；拿不准就先复用。
                 - 主人明确点了模型（比如「用 GLM 写」「这次用 kimi」）：先调 secretary_models 确认 provider，再把 model 传成 provider/model（如 zai/glm-5.3）；主人没说就**不要自己挑模型**，自动选模型暂不启用。
                 - 需要主人拍板时才问，别为省事什么都问。
                 - 语气：开场（或主人提到称呼/语气时）先调 secretary_persona_get，按主人自己设的称呼语气说话；没设置就用上面的默认。
@@ -170,6 +171,10 @@
         workerPermissionPreset: workspace-write
         workerApprovalPolicy: ask
         guiNotify: { enabled: false }
+        # 花费账本单价（CNY/百万 token）；default 用于未指定模型的任务
+        cost:
+          rates:
+            default: { inputPerM: 1.08, outputPerM: 4.32, cacheReadPerM: 0.0216 }
         waitDefaultSec: 45
         waitMaxSec: 120
         dispatchDelayMs: 8000

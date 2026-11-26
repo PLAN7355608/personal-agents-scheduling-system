@@ -167,6 +167,36 @@ INSERT INTO memories_fts(memories_fts) VALUES ('rebuild');
 `,
   },
   {
+    version: 18,
+    sql: `
+CREATE TABLE IF NOT EXISTS cost_usage (
+  workitem_id  TEXT PRIMARY KEY,
+  session_id   TEXT,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read   INTEGER NOT NULL DEFAULT 0,
+  cache_write  INTEGER NOT NULL DEFAULT 0,
+  cost_cny     REAL NOT NULL DEFAULT 0,
+  updated_at   INTEGER NOT NULL
+);
+`,
+  },
+  {
+    version: 17,
+    sql: `
+CREATE TABLE IF NOT EXISTS revisions (
+  id          TEXT PRIMARY KEY,
+  workitem_id TEXT NOT NULL,
+  path        TEXT NOT NULL,
+  revision    INTEGER NOT NULL,
+  source      TEXT,
+  note        TEXT,
+  created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rev_item ON revisions(workitem_id, created_at);
+`,
+  },
+  {
     version: 16,
     sql: `
 ALTER TABLE workitems ADD COLUMN source_session_id TEXT;

@@ -92,3 +92,32 @@ test('删除护栏：Windows 命令族与不可解析形态', () => {
   assert.equal(analyzeDeletionCommand('pwsh -File kill.ps1', { workspaceRoot: ws }).action, 'escalate')
   assert.equal(analyzeDeletionCommand('git clean -fdx', { workspaceRoot: ws }).action, 'escalate')
 })
+test('删除护栏：python 里 dd=... 不误判成 dd 命令', () => {
+  const ws = makeWorkspace()
+  const cmd = 'cd /tmp && CID=d64e1defe && curl -s "https://example.com/search/$CID" -o a1.json && python3 -c "import json;d=json.load(open(\'a1.json\'));dd=d.get(\'data\',{});print(dd)"'
+  const r = analyzeDeletionCommand(cmd, { workspaceRoot: ws })
+  assert.equal(r.kind, 'none')
+})
+
+test('删除护栏：工作区内通配（任务临时图/脚本）按规模放行', () => {
+  const ws = makeWorkspace()
+  for (let i = 0; i < 3; i += 1) writeFileSync(join(ws, 'sub', 'tb-' + i + '.png'), 'x')
+  const r = analyzeDeletionCommand('cd ' + join(ws, 'sub') + ' && rm -f tb-*.png', { workspaceRoot: ws, maxFilesAuto: 50 })
+  assert.equal(r.kind, 'delete')
+  assert.equal(r.action, 'allow')
+  assert.equal(r.count, 3)
+})
+
+test('删除护栏：通配没有匹配到文件则拒绝', () => {
+  const ws = makeWorkspace()
+  const r = analyzeDeletionCommand('cd ' + join(ws, 'sub') + ' && rm -f nope-*.png', { workspaceRoot: ws })
+  assert.equal(r.kind, 'delete')
+  assert.equal(r.action, 'deny')
+})
+
+test('删除护栏：find -exec rm 仍转审批', () => {
+  const ws = makeWorkspace()
+  const r = analyzeDeletionCommand('find . -name "x" -exec rm {} \\;', { workspaceRoot: ws })
+  assert.equal(r.kind, 'delete')
+  assert.equal(r.action, 'escalate')
+})

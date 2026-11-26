@@ -29,7 +29,7 @@ import { agentSessionId, buildWorkerToolEvent, redactText, toolNameOf } from './
 import { normalizeWorkerPermission, relayDenialMessage, relayToolAllowed, workerDenialMessage, workerToolAllowed } from './src/guard.js'
 import { resolveDbPath, resolveWorkspaceRoot } from './src/paths.js'
 import {
-  adoptSession, claimLane, ensureLane, focusFromText, getLaneById, laneContext as laneRecentContext, laneKeyFor, listLanes,
+  adoptSession, claimLane, ensureLane, findLaneRef, focusFromText, getLaneById, laneContext as laneRecentContext, laneKeyFor, listLanes,
   nextQueuedOnLane, releaseLane, repairStuckLanes, sweepIdleLanes,
 } from './src/lanes.js'
 import { inferScope } from './src/scope.js'
@@ -37,6 +37,9 @@ import { resolveTaskWorkspace } from './src/workspace.js'
 import { looksLikeFileTask, sniffFiles } from './src/filesniff.js'
 import { analyzeDeletionCommand } from './src/deletion-guard.js'
 import { readSessionHeader, readSessionEvents, sessionAgeDays, vetWorkerPreset } from './src/session-store.js'
+import { auditWorkerGuidance, sessionHasManualInput } from './src/session-audit.js'
+import { addRevision, countRevisions, latestRevision, scanRecentFiles } from './src/revisions.js'
+import { costFor, costTotals, estimateCost, extractUsage, recordUsage } from './src/cost.js'
 import { countPendingToolRequests, createToolRequest, decideToolRequest, escalateToolRequest, getToolRequest, hasToolGrant, learnedToolGrant, listToolRequests, toolRequestForbidden } from './src/tool-requests.js'
 import { protectedBoundaryReason } from './src/protected.js'
 import { pickDuplicate } from './src/dedupe.js'
@@ -76,6 +79,8 @@ const DEFAULTS = {
   laneIdleTtlMs: 30 * 60 * 1000,
   seedMaxEvents: 500,
   judge: { enabled: true, provider: 'deepseek-account', model: 'deepseek-flash', maxTokens: 300, timeoutMs: 15000 },
+  // 花费账本单价（CNY/百万 token）：{'provider/model': {inputPerM, outputPerM, cacheReadPerM}}
+  cost: { rates: {} },
   learnToolPolicies: true,
   allowedWorkspaces: [],
   workerPromptMaxChars: 4000,
@@ -403,6 +408,173 @@ export function apply(ctx, config) {
     }
   }
 
+  // 旁路审计：读工人会话日志，把主人直接说的/批注的内容记进账本（不改变任务状态）
+  let lastGuidanceAuditAt = 0
+  function auditWorkerGuidanceLite() {
+    const now = Date.now()
+    if (now - lastGuidanceAuditAt < 15000) return
+    lastGuidanceAuditAt = now
+    try {
+      const recentTerminalCutoff = now - 2 * 3600 * 1000
+      const rows = db.prepare(
+        "SELECT id, session_id, source_channel, created_at, updated_at, status, workspace FROM workitems WHERE session_id IS NOT NULL " +
+        "AND (status IN ('running','blocked','waiting_human') OR (status IN ('done','failed','cancelled') AND updated_at > ?)) " +
+        "ORDER BY updated_at DESC LIMIT 8",
+      ).all(recentTerminalCutoff)
+      let total = 0
+      for (const row of rows) {
+        const since = isTerminal(row.status) ? Number(row.updated_at || 0) : Number(row.created_at || 0)
+        const n = auditWorkerGuidance(db, {
+          sessionId: row.session_id,
+          workitemId: row.id,
+          ownerId: cfg.ownerId,
+          channel: row.source_channel,
+          appendEvent,
+          since,
+          log,
+        })
+        total += n
+        if (n && isTerminal(row.status)) recordContinuation(row, n)
+      }
+      if (total) log('旁路审计：新增人工指导记录 ' + total + ' 条')
+    } catch (err) {
+      log('旁路审计失败：' + describeError(err))
+    }
+  }
+
+  // 续作：任务 done 后主人继续让同一工人改，记一条 continuation + 观察到的产物变更
+  function recordContinuation(item, newGuidance) {
+    if (!item || !newGuidance) return
+    try {
+      appendEvent(db, {
+        type: EVENT_TYPE.WORKER_CONTINUATION,
+        ownerId: cfg.ownerId,
+        workitemId: item.id,
+        sessionId: item.sessionId,
+        channel: item.sourceChannel,
+        actor: 'owner',
+        payload: { newGuidance, at: Date.now(), note: '主人 continuation（同一工人继续改）' },
+      })
+    } catch { /* ignore */ }
+    // 「重开一轮」：任务已 done/failed 但主人又在会话里接着改，账本上单独记一笔，
+    // 不改原结论（done 仍是 done），只让面板/复盘看得出「又改过 N 轮」。
+    try {
+      const rounds = db.prepare("select count(*) as c from events where type = 'item.reopened' and workitem_id = ?").get(item.id).c + 1
+      appendEvent(db, {
+        type: EVENT_TYPE.ITEM_REOPENED,
+        ownerId: cfg.ownerId,
+        workitemId: item.id,
+        sessionId: item.sessionId,
+        channel: item.sourceChannel,
+        actor: 'owner',
+        payload: { round: rounds, fromStatus: item.status, at: Date.now(), note: '主人续作，工人接着改（原结论保留）' },
+      })
+    } catch { /* ignore */ }
+    try {
+      const since = Number(item.updatedAt || item.createdAt || 0)
+      for (const f of scanRecentFiles(item.workspace, since, { limit: 10 })) {
+        addRevision(db, {
+          workitemId: item.id,
+          path: f.path,
+          source: 'observed',
+          note: '续作后观察到的文件变更',
+          mtime: f.mtime,
+        })
+      }
+    } catch (err) {
+      log('续作产物扫描失败：' + describeError(err))
+    }
+  }
+
+  // 终态任务的工人默认停手；但主人在会话里手动发消息（批注/改稿）后，视为“接手”，放行工具
+  const manualTakeoverCache = new Map()
+  function manualTakeover(sessionId, item) {
+    if (!sessionId || !item) return false
+    const now = Date.now()
+    const cached = manualTakeoverCache.get(sessionId)
+    if (cached && now - cached.at < 30000) return cached.allow
+    let allow = false
+    try {
+      allow = sessionHasManualInput(sessionId, Number(item.updatedAt || item.createdAt || 0))
+    } catch { allow = false }
+    manualTakeoverCache.set(sessionId, { at: now, allow })
+    if (allow) {
+      log('任务终态但主人在会话里接管，放行工具：' + sessionId)
+      try {
+        const n = auditWorkerGuidance(db, {
+          sessionId,
+          workitemId: item.id,
+          ownerId: cfg.ownerId,
+          channel: item.sourceChannel,
+          appendEvent,
+          since: Number(item.updatedAt || item.createdAt || 0),
+          log,
+        })
+        if (n) recordContinuation(item, n)
+      } catch { /* 审计失败不影响放行 */ }
+    }
+    return allow
+  }
+
+  // 花费账本：读工人会话日志里的 usage，写 cost_usage（不改变任务）
+  let lastUsageScanAt = 0
+  function scanUsageLite() {
+    const now = Date.now()
+    if (now - lastUsageScanAt < 30000) return
+    lastUsageScanAt = now
+    try {
+      const rows = db.prepare(
+        "SELECT id, model, session_id FROM workitems WHERE session_id IS NOT NULL AND (status IN ('running','blocked') OR updated_at > ?) ORDER BY updated_at DESC LIMIT 5",
+      ).all(now - 3600 * 1000)
+      for (const row of rows) {
+        let events = []
+        try {
+          events = (readSessionEvents(row.session_id) || {}).events || []
+        } catch { continue }
+        const usage = extractUsage(events)
+        if (!usage.total) continue
+        const rates = (cfg.cost && cfg.cost.rates) || {}
+        const rate = rates[row.model] || rates['default'] || null
+        recordUsage(db, { workitemId: row.id, sessionId: row.session_id, usage, costCny: estimateCost(usage, rate), now })
+      }
+    } catch (err) {
+      log('花费扫描失败：' + describeError(err))
+    }
+  }
+
+  // 续作产物巡检：主人在会话里接着说之后产生的文件改动，补登记进 revisions。
+  // 为什么需要它：recordContinuation 里的那次扫描发生在「刚收到指导」的瞬间，文件还没改，
+  // 结果「指导 → 新版本」的版本链是断的（2026-11-26 办公机名单那次就是 0 条 revision）。
+  let lastArtifactScanAt = 0
+  function scanContinuationArtifacts() {
+    const now = Date.now()
+    if (now - lastArtifactScanAt < 60 * 1000) return
+    lastArtifactScanAt = now
+    try {
+      const rows = db.prepare(
+        `SELECT w.id, w.workspace, w.updated_at FROM workitems w
+         WHERE w.workspace IS NOT NULL AND w.updated_at > ?
+           AND EXISTS (SELECT 1 FROM events e WHERE e.workitem_id = w.id AND e.type = ?)
+         ORDER BY w.updated_at DESC LIMIT 5`,
+      ).all(now - 2 * 3600 * 1000, EVENT_TYPE.WORKER_CONTINUATION)
+      for (const row of rows) {
+        const lastRev = db.prepare('SELECT MAX(created_at) AS t FROM revisions WHERE workitem_id = ?').get(row.id)
+        const since = Math.max(Number(lastRev && lastRev.t ? lastRev.t : 0), Number(row.updated_at || 0))
+        for (const f of scanRecentFiles(row.workspace, since, { limit: 10 })) {
+          addRevision(db, {
+            workitemId: row.id,
+            path: f.path,
+            source: 'observed',
+            note: '续作后补记的产物版本',
+            mtime: f.mtime,
+          })
+        }
+      }
+    } catch (err) {
+      log('续作产物巡检失败：' + describeError(err))
+    }
+  }
+
   function closeWorkerSessions(workitemId) {
     try {
       db.prepare("UPDATE sessions SET status = 'closed', closed_at = ? WHERE workitem_id = ? AND role = 'worker' AND status = 'live'")
@@ -475,6 +647,7 @@ export function apply(ctx, config) {
       scope: { type: 'string', description: '作用域（scope）：项目内的相对路径前缀（可选，例如 plugin/src）' },
       workspace: { type: 'string', description: '任务工作区（绝对目录；可选，默认内核工作区）。工人会话会在这个目录里开。' },
       worker: { type: 'string', description: '可选：auto（默认，复用本线工人）| new（另起一个新工人，用于和当前线无关的活）' },
+      lane: { type: 'string', description: '可选：要接续的线，传 lane_xxx 或上一单的 wi_xxx——新任务会挂到那条线，由同一个工人接着干（涉及「接着上次/同一批活」时必须传）。线 id 可看面板或 GET /secretary/v1/lanes，直接传上一单的 wi_xxx 最省事' },
       model: { type: 'string', description: '可选：指定工人模型，格式 provider/model（如 zai/glm-5.3、moonshotai-cn/kimi-k3）。不填则按 topic/配置/默认走' },
       notify: { type: 'boolean', description: '可选：这一单完成后是否回灌到当前对话（覆盖全局 guiNotify 开关）' },
       force: { type: 'boolean', description: '可选：确实要再派一单同类任务时传 true（绕过去重）' },
@@ -488,7 +661,21 @@ export function apply(ctx, config) {
       // 工作区：显式指定优先，否则内核默认；不存在/不允许直接拒绝
       const ws = resolveTaskWorkspace(args?.workspace, cfg)
       if (ws.error) return { ok: false, message: ws.error }
-      const cwd = ws.cwd
+      let cwd = ws.cwd
+
+      // 显式接续某条线（lane_xxx 或上一单 wi_xxx）：新任务挂过去，由同一个工人接着干
+      let laneExplicit = null
+      let laneSource = 'auto'
+      const laneRefRaw = String(args?.lane || '').trim()
+      if (laneRefRaw) {
+        const found = findLaneRef(db, laneRefRaw)
+        if (!found) {
+          return { ok: false, message: '找不到这条线：' + laneRefRaw + '。可查面板的线列表（GET /secretary/v1/lanes）或上一单的 wi_xxx' }
+        }
+        if (!args?.workspace && found.workspace) cwd = found.workspace
+        laneExplicit = found
+        laneSource = 'explicit'
+      }
 
       // 派单去重：同一工作区已有同类在办任务时复用，避免「一活两单、两个工人并发改同一台机器」
       if (args?.force !== true) {
@@ -514,17 +701,20 @@ export function apply(ctx, config) {
       // 线 = 来源会话（GUI/Relay）；没有会话就用 peer（外部通道）；同会话不同工作区 = 不同线
       let sessionId = ''
       try { sessionId = agentSessionId(exec) || '' } catch { sessionId = '' }
-      let lane = null
-      try {
-        const focus = focusFromText(text)
-        const unique = String(args?.worker || '').toLowerCase() === 'new' ? Date.now().toString(36) : null
-        lane = ensureLane(db, {
-          ownerId: cfg.ownerId,
-          key: laneKeyFor({ sessionId, channel: 'gui', peer: cfg.ownerId, workspace: cwd, baseWorkspace: cfg.workspaceRoot, focus, unique }),
-          workspace: cwd,
-        })
-      } catch (err) {
-        log('建线失败（退回无线模式）：' + describeError(err))
+      let lane = laneExplicit
+      if (!lane) {
+        try {
+          const focus = focusFromText(text)
+          const unique = String(args?.worker || '').toLowerCase() === 'new' ? Date.now().toString(36) : null
+          laneSource = unique ? 'new' : 'auto'
+          lane = ensureLane(db, {
+            ownerId: cfg.ownerId,
+            key: laneKeyFor({ sessionId, channel: 'gui', peer: cfg.ownerId, workspace: cwd, baseWorkspace: cfg.workspaceRoot, focus, unique }),
+            workspace: cwd,
+          })
+        } catch (err) {
+          log('建线失败（退回无线模式）：' + describeError(err))
+        }
       }
 
       // 路由诊断：记录这次任务为什么落在/该落在哪条线，供以后分析自动分线
@@ -542,6 +732,8 @@ export function apply(ctx, config) {
             actor: ACTOR.RELAY,
             payload: {
               laneKey: cwdKey,
+              laneId: lane.id,
+              laneSource,
               focus: focusFromText(text),
               topic: args?.topic ? String(args.topic) : classifyTopic(text),
               workerParam: args?.worker ? String(args.worker) : 'auto',
@@ -1064,6 +1256,79 @@ export function apply(ctx, config) {
   }))
 
   ctx.tools.register(defineTool({
+    name: 'secretary_steer_worker',
+    description:
+      '给正在办的任务的工人追加一条人工指令（主人的修改意见/批注）。内核会记录进账本并投递给工人会话；' +
+      '不改任务状态，工人仍在原任务里改，改完照常 work_finish。',
+    parameters: {
+      workitem_id: { type: 'string', required: true, description: '任务 ID' },
+      message: { type: 'string', required: true, description: '要转达给工人的修改意见（原文，不要改写）' },
+    },
+    output: JSON_OUTPUT,
+    async execute(args) {
+      const id = String(args?.workitem_id || '').trim()
+      const message = String(args?.message || '').trim()
+      if (!id || !message) return { ok: false, message: 'workitem_id 和 message 都要填' }
+      const item = getWorkItem(db, id)
+      if (!item) return { ok: false, message: '找不到任务 ' + id }
+      if (!['running', 'blocked', 'waiting_human'].includes(item.status)) {
+        return { ok: false, message: '任务当前状态是 ' + item.status + '，只有 running / blocked / waiting_human 能追加指令' }
+      }
+      if (!item.sessionId) return { ok: false, message: '这个任务还没有工人会话，无法投递' }
+      const text = '【主人补充指令】' + message +
+        '\n继续原任务，按这条意见修改；改完照常调 secretary_work_finish，不要新建任务。'
+      // 优先用 Agent.steer：运行中的工人会在「下一步」就收到（不用等整轮结束）；不行再退回排队
+      let mode = 'queued'
+      try {
+        const agents = svc(ctx, 'agents')
+        let agent = null
+        try {
+          const got = agents && typeof agents.get === 'function' ? agents.get(item.sessionId) : null
+          agent = got && (got.agent || got)
+        } catch { /* ignore */ }
+        if (agent && typeof agent.steer === 'function') {
+          let msg = null
+          try {
+            const mod = await import('@deepseek-ai/dsh-llm')
+            if (mod && typeof mod.createUserMessage === 'function') msg = mod.createUserMessage(text)
+          } catch { /* 包不可直接 import 时用普通消息结构 */ }
+          if (!msg) {
+            msg = {
+              role: 'user',
+              id: randomUUID(),
+              content: [{ type: 'text', text }],
+              source: { kind: 'user', rpcId: 'sec-steer-' + id.slice(0, 8) + '-' + Date.now().toString(36) },
+            }
+          }
+          agent.steer(msg)
+          mode = 'steer'
+        }
+      } catch (err) {
+        log('steer 投递失败，回退排队：' + describeError(err))
+      }
+      if (mode !== 'steer') {
+        try {
+          await promptSession(ctx, item.sessionId, text, { log })
+        } catch (err) {
+          return { ok: false, message: '投递失败：' + describeError(err) }
+        }
+      }
+      try {
+        appendEvent(db, {
+          type: EVENT_TYPE.WORKER_USER_MESSAGE,
+          ownerId: cfg.ownerId,
+          workitemId: id,
+          sessionId: item.sessionId,
+          channel: item.sourceChannel,
+          actor: 'owner',
+          payload: { source: 'kernel', mode, chars: message.length, preview: message.slice(0, 300), at: Date.now() },
+        })
+      } catch { /* 审计失败不影响投递 */ }
+      return { ok: true, workitem_id: id, mode, message: mode === 'steer' ? '已插话给工人（下一步就生效）；任务状态不变。' : '已转达给工人（排在当前轮之后处理）；任务状态不变。' }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'secretary_prune',
     description: '清理旧的终态任务（done/failed/cancelled）。默认只预览清单；真删必须 dry_run=false 且 confirm=true。事件账本永远保留（可审计）。',
     parameters: {
@@ -1487,10 +1752,12 @@ export function apply(ctx, config) {
           if (row) {
             const w = row.workitem_id ? getWorkItem(db, row.workitem_id) : null
             const laneId = w ? w.laneId : null
-            // 任务已取消/结束：工人必须立刻停手（取消不能只改状态、工人还在改机器）
-            if (w && (w.status === 'cancelled' || w.status === 'merged' || w.status === 'blocked')) {
-              log('工人调用被拦（任务已结束 ' + w.status + '）：' + name)
-              return '这个任务已经是 ' + w.status + ' 状态，立即停止，不要再调用任何工具，也不要继续修改系统或文件。'
+            // 任务已取消/结束：工人默认必须停手；但主人在会话里手动接管（批注、改稿）时放行
+            if (w && (w.status === 'cancelled' || w.status === 'merged' || w.status === 'blocked' || w.status === 'done' || w.status === 'failed')) {
+              if (!manualTakeover(sid, w)) {
+                log('工人调用被拦（任务已结束 ' + w.status + '）：' + name)
+                return '这个任务已经是 ' + w.status + ' 状态，立即停止，不要再调用任何工具，也不要继续修改系统或文件。'
+              }
             }
             // 系统保护边界：写系统目录 / 提权命令，必须走工具申请，不许工人悄悄改
             try {
@@ -1658,17 +1925,29 @@ export function apply(ctx, config) {
               if (body.model && !parseModelRef(body.model)) return send(res, 400, { ok: false, error: 'model 格式应为 provider/model' })
               const ws = resolveTaskWorkspace(body.workspace, cfg)
               if (ws.error) return send(res, 400, { ok: false, error: ws.error })
-              const cwd = ws.cwd
+              let cwd = ws.cwd
+              // 显式接续某条线：lane_xxx 或上一单 wi_xxx
               let lane = null
-              try {
-                const focus = focusFromText(text)
-                const unique = String(body.worker || '').toLowerCase() === 'new' ? Date.now().toString(36) : null
-                lane = ensureLane(db, {
-                  ownerId: cfg.ownerId,
-                  key: laneKeyFor({ channel: 'gui', peer: cfg.ownerId, workspace: cwd, baseWorkspace: cfg.workspaceRoot, focus, unique }),
-                  workspace: cwd,
-                })
-              } catch (err) { log('建线失败：' + describeError(err)) }
+              let laneSource = 'auto'
+              const laneRefRaw = String(body.lane || '').trim()
+              if (laneRefRaw) {
+                lane = findLaneRef(db, laneRefRaw)
+                if (!lane) return send(res, 400, { ok: false, error: '找不到这条线：' + laneRefRaw })
+                if (!body.workspace && lane.workspace) cwd = lane.workspace
+                laneSource = 'explicit'
+              }
+              if (!lane) {
+                try {
+                  const focus = focusFromText(text)
+                  const unique = String(body.worker || '').toLowerCase() === 'new' ? Date.now().toString(36) : null
+                  laneSource = unique ? 'new' : 'auto'
+                  lane = ensureLane(db, {
+                    ownerId: cfg.ownerId,
+                    key: laneKeyFor({ channel: 'gui', peer: cfg.ownerId, workspace: cwd, baseWorkspace: cfg.workspaceRoot, focus, unique }),
+                    workspace: cwd,
+                  })
+                } catch (err) { log('建线失败：' + describeError(err)) }
+              }
               try {
                 if (lane) {
                   const prev = db.prepare(
@@ -1681,6 +1960,8 @@ export function apply(ctx, config) {
                     actor: ACTOR.RELAY,
                     payload: {
                       laneKey: lane.key,
+                      laneId: lane.id,
+                      laneSource,
                       focus: focusFromText(text),
                       topic: body.topic ? String(body.topic) : classifyTopic(text),
                       workerParam: body.worker ? String(body.worker) : 'auto',
@@ -1745,13 +2026,34 @@ export function apply(ctx, config) {
             } else if (path === '/panel') {
               const active = listWorkItems(db, { limit: 50 }).filter((w) => !isTerminal(w.status))
               const runningCount = db.prepare("SELECT COUNT(*) AS n FROM workitems WHERE status = 'running'").get()
+              const guidanceCounts = {}
+              const revisionCounts = {}
+              const costToday = (() => {
+                const d = new Date()
+                d.setHours(0, 0, 0, 0)
+                return costTotals(db, { since: d.getTime() })
+              })()
+              const costMonth = (() => {
+                const d = new Date()
+                d.setDate(1)
+                d.setHours(0, 0, 0, 0)
+                return costTotals(db, { since: d.getTime() })
+              })()
+              try {
+                for (const g of db.prepare("SELECT workitem_id, COUNT(*) AS n FROM events WHERE type = 'worker.user_message' GROUP BY workitem_id").all()) {
+                  guidanceCounts[g.workitem_id] = Number(g.n || 0)
+                }
+                for (const r of db.prepare("SELECT workitem_id, COUNT(*) AS n FROM revisions GROUP BY workitem_id").all()) {
+                  revisionCounts[r.workitem_id] = Number(r.n || 0)
+                }
+              } catch { /* ignore */ }
               body = {
                 ok: true,
                 counts: summaryCounts(db),
-                active: active.map((w) => ({ id: w.id, status: w.status, intent: w.intent, needsHuman: w.needsHuman, updatedAt: w.updatedAt, sessionId: w.sessionId, laneId: w.laneId, workspace: w.workspace, projectRoot: w.projectRoot, scope: w.scope, scopeSource: w.scopeSource, lastStep: lastWorkerTool(w.id) })),
+                active: active.map((w) => ({ id: w.id, status: w.status, intent: w.intent, needsHuman: w.needsHuman, updatedAt: w.updatedAt, sessionId: w.sessionId, laneId: w.laneId, workspace: w.workspace, projectRoot: w.projectRoot, scope: w.scope, scopeSource: w.scopeSource, lastStep: lastWorkerTool(w.id), guidance: guidanceCounts[w.id] || 0, revisions: revisionCounts[w.id] || 0, latestRevision: latestRevision(db, w.id), cost: costFor(db, w.id) })),
                 lanes: listLanes(db, { ownerId: cfg.ownerId, limit: 20 }).map((l) => ({ id: l.id, key: l.key, status: l.status, projectRoot: l.projectRoot, scope: l.scope, scopeMode: l.scopeMode, sessionId: l.sessionId, current: l.currentWorkitemId, lastUsedAt: l.lastUsedAt })),
                 needsHuman: active.filter((w) => w.needsHuman).length,
-                recent: db.prepare("SELECT * FROM workitems WHERE status IN ('done','failed','cancelled') ORDER BY updated_at DESC LIMIT 5").all().map((r) => ({ id: r.id, status: r.status, intent: String(r.intent || '').slice(0, 60), updatedAt: Number(r.updated_at), sessionId: r.session_id || null, laneId: r.lane_id || null, projectRoot: r.project_root || null, scope: r.scope || null, scopeSource: r.scope_source || null, scopeConfidence: r.scope_confidence ?? null, workspace: r.workspace || null })),
+                recent: db.prepare("SELECT * FROM workitems WHERE status IN ('done','failed','cancelled') ORDER BY updated_at DESC LIMIT 5").all().map((r) => ({ id: r.id, status: r.status, intent: String(r.intent || '').slice(0, 60), updatedAt: Number(r.updated_at), sessionId: r.session_id || null, laneId: r.lane_id || null, projectRoot: r.project_root || null, scope: r.scope || null, scopeSource: r.scope_source || null, scopeConfidence: r.scope_confidence ?? null, workspace: r.workspace || null, guidance: guidanceCounts[r.id] || 0, revisions: revisionCounts[r.id] || 0, latestRevision: latestRevision(db, r.id) })),
                 workers: Number(runningCount.n || 0),
                 toolRequests: (() => {
                   const rows = db.prepare(
@@ -1783,6 +2085,8 @@ export function apply(ctx, config) {
                 })(),
                 briefingEnabled: briefingEnabled(),
                 pendingDeliveries: Number(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'delivery.pending' AND ts >= ?").get(Date.now() - 86400000).n || 0),
+                costToday,
+                costMonth,
                 lastError: state.lastError,
               }
             } else if (path === '/lanes') {
@@ -1880,6 +2184,18 @@ export function apply(ctx, config) {
           if (timedOut.laneId) laneReleaseAndPump(timedOut.laneId)
           log('任务超时标 blocked：' + row.id)
         }
+        // 任务已结束但工具申请还挂着：自动拒绝，避免永久 pending 无人处理
+        try {
+          const stale = db.prepare(
+            "UPDATE tool_requests SET status = 'denied', decided_by = 'system', decided_at = ? " +
+            "WHERE status IN ('pending','escalated') AND workitem_id IN (SELECT id FROM workitems WHERE status IN ('done','failed','cancelled','merged'))",
+          ).run(Date.now())
+          if (stale.changes) log('自动拒绝终态任务的挂起申请：' + stale.changes + ' 条')
+        } catch { /* 清理失败不影响主循环 */ }
+        // 旁路审计：工人会话里主人直接说的/批注的内容，补记进账本
+        auditWorkerGuidanceLite()
+        scanUsageLite()
+        scanContinuationArtifacts()
         // 线维护：空闲太久关会话；卡住的线自动释放；空线但有排队就拉起
         try {
           const closed = sweepIdleLanes(db, { ttlMs: Number(cfg.laneIdleTtlMs) || 30 * 60 * 1000 })

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { openDb } from '../../src/db.js'
 import { createWorkItem, finishWorkItem, getWorkItem, transition } from '../../src/workitems.js'
 import {
-  adoptSession, claimLane, ensureLane, getLaneByKey, getLaneById, laneContext, laneKeyFor,
+  adoptSession, claimLane, ensureLane, getLaneByKey, getLaneById, findLaneRef, laneContext, laneKeyFor, laneSummary,
   nextQueuedOnLane, releaseLane, repairStuckLanes, sweepIdleLanes,
 } from '../../src/lanes.js'
 import { inferScope } from '../../src/scope.js'
@@ -123,5 +123,30 @@ test('登记已有会话：任何会话都能挂到线上，meta 记 adopt/backf
   // 释放后会话仍在（不被清掉）
   releaseLane(db, lane.id)
   assert.equal(getLaneById(db, lane.id).sessionId, 'session-old-worker')
+  db.close()
+})
+test('findLaneRef：认 lane id，也认上一单 wi_xxx', () => {
+  const db = fresh()
+  const lane = ensureLane(db, { key: 'session:s1' })
+  const { item } = createWorkItem(db, { channel: 'gui', peer: 'owner', intent: '接着写材料', laneId: lane.id })
+  assert.equal(findLaneRef(db, lane.id).id, lane.id)
+  assert.equal(findLaneRef(db, item.id).id, lane.id)
+  assert.equal(findLaneRef(db, 'wi_notexist'), null)
+  assert.equal(findLaneRef(db, '随便什么'), null)
+  assert.equal(findLaneRef(db, ''), null)
+  db.close()
+})
+
+test('laneSummary：带任务数和最近一单，供 secretary_lanes 用', () => {
+  const db = fresh()
+  const lane = ensureLane(db, { key: 'session:s1', workspace: '/root/example' })
+  createWorkItem(db, { channel: 'gui', peer: 'owner', intent: '第一单', laneId: lane.id, ts: Date.now() - 1000 })
+  const latest = createWorkItem(db, { channel: 'gui', peer: 'owner', intent: '第二单', laneId: lane.id, ts: Date.now() }).item
+  const s = laneSummary(db, getLaneById(db, lane.id))
+  assert.equal(s.id, lane.id)
+  assert.equal(s.workspace, '/root/example')
+  assert.equal(s.tasks, 2)
+  assert.equal(s.lastTask.id, latest.id)
+  assert.match(s.lastTask.intent, /第二单/)
   db.close()
 })

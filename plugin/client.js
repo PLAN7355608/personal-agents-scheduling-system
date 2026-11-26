@@ -109,6 +109,8 @@ window.__ModuleLoader__.load({
       for (const l of lanes) laneById[l.id] = l
       const activeLanes = lanes.filter((l) => l.status === 'active').length
       const toolReqs = (data && data.toolRequests) || { pending: 0, items: [] }
+      const costToday = (data && data.costToday) || { tokens: 0, costCny: 0 }
+      const costMonth = (data && data.costMonth) || { tokens: 0, costCny: 0 }
       const httpResults = (data && data.httpResults) || []
       const needs = active.filter((w) => w.needsHuman)
       const nActive = active.length
@@ -167,6 +169,11 @@ window.__ModuleLoader__.load({
           h('div', { style: { fontSize: 11.5, color: C.dim, marginBottom: 8 } },
             '在办 ' + nActive + ' · 干活线 ' + activeLanes + ' · 需要人 ' + nNeeds + ' · 完成 ' + (counts.done || 0) +
             ' · 失败 ' + (counts.failed || 0) + ' · 卡住 ' + (counts.blocked || 0)),
+          h('div', { style: { fontSize: 10.5, color: C.dim, marginBottom: 6 } },
+            '今日 tokens ' + costToday.tokens +
+            (costToday.costCny > 0 ? ' · ¥' + Number(costToday.costCny).toFixed(2) : '') +
+            ' ｜ 本月 ' + costMonth.tokens +
+            (costMonth.costCny > 0 ? ' · ¥' + Number(costMonth.costCny).toFixed(2) : '')),
           h('div', { style: { display: 'flex', gap: 6, marginBottom: 6 } },
             h('span', {
               onClick: () => setShowAll(false),
@@ -243,7 +250,14 @@ window.__ModuleLoader__.load({
                   scopeChip(w, laneById),
                   h('div', { style: { fontSize: 10.5, color: C.dim, marginTop: 2 } },
                     statusText(w.status) + ' · ' + w.id.slice(0, 14) +
+                    (w.guidance ? ' · 人工指导 ' + w.guidance : '') +
+                    (w.revisions ? ' · 修订 ' + w.revisions : '') +
+                    (w.cost && w.cost.tokens ? ' · ' + w.cost.tokens + ' tok' : '') +
                     (w.sessionId ? ' · 会话 ' + String(w.sessionId).replace(/^session-/, '').slice(0, 8) : '')),
+                  w.latestRevision
+                    ? h('div', { style: { fontSize: 10, color: C.ok, marginTop: 1 } },
+                        '最新：' + baseName(w.latestRevision.path) + '（v' + w.latestRevision.revision + '）')
+                    : null,
                   ))
                 : h('div', { style: { fontSize: 12, color: C.dim } }, '最近没有结束的任务。'))
             : (nActive === 0
@@ -263,7 +277,14 @@ window.__ModuleLoader__.load({
                   scopeChip(w, laneById),
                   h('div', { style: { fontSize: 10.5, color: C.dim, marginTop: 2 } },
                     statusText(w.status) + ' · ' + w.id.slice(0, 14) +
+                    (w.guidance ? ' · 人工指导 ' + w.guidance : '') +
+                    (w.revisions ? ' · 修订 ' + w.revisions : '') +
+                    (w.cost && w.cost.tokens ? ' · ' + w.cost.tokens + ' tok' : '') +
                     (w.sessionId ? ' · 会话 ' + String(w.sessionId).replace(/^session-/, '').slice(0, 8) : '')),
+                  w.latestRevision
+                    ? h('div', { style: { fontSize: 10, color: C.ok, marginTop: 1 } },
+                        '最新：' + baseName(w.latestRevision.path) + '（v' + w.latestRevision.revision + '）')
+                    : null,
                   w.lastStep
                     ? h('div', { style: { fontSize: 10.5, color: w.lastStep.running ? C.accent : (w.lastStep.ok ? C.dim : C.bad), marginTop: 1 } },
                         w.lastStep.running

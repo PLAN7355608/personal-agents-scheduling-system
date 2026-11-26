@@ -68,15 +68,19 @@ export function ensureLane(db, {
 } = {}) {
   const existing = getLaneByKey(db, ownerId, key)
   if (existing) {
+    if (workspace && !existing.workspace) {
+      db.prepare('UPDATE lanes SET workspace = ?, last_used_at = ? WHERE id = ?').run(workspace, now, existing.id)
+      return { ...existing, workspace, lastUsedAt: now }
+    }
     db.prepare('UPDATE lanes SET last_used_at = ? WHERE id = ?').run(now, existing.id)
     return { ...existing, lastUsedAt: now }
   }
   const id = newLaneId()
   const mode = SCOPE_MODES.includes(scopeMode) ? scopeMode : 'suggest'
   db.prepare(
-    `INSERT INTO lanes (id, owner_id, key, label, scope_mode, worker_type, status, last_used_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(id, ownerId, key, label, mode, workerType, LANE_STATUS.IDLE, now, now)
+    `INSERT INTO lanes (id, owner_id, key, label, scope_mode, worker_type, status, workspace, last_used_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, ownerId, key, label, mode, workerType, LANE_STATUS.IDLE, workspace, now, now)
   return getLaneById(db, id)
 }
 
@@ -186,4 +190,39 @@ export function focusFromText(text) {
     if (idx > 0) return p.slice(0, idx)
   }
   return null
+}
+/** 按「lane_xxx」或「上一单 wi_xxx」找线。给 create_task 的 lane 参数用；找不到返回 null。 */
+export function findLaneRef(db, raw) {
+  const ref = String(raw || '').trim()
+  if (!ref) return null
+  if (ref.startsWith('lane_')) return getLaneById(db, ref)
+  if (ref.startsWith('wi_')) {
+    const row = db.prepare('SELECT lane_id FROM workitems WHERE id = ?').get(ref)
+    return row && row.lane_id ? getLaneById(db, row.lane_id) : null
+  }
+  return null
+}
+
+/** 线的摘要（带最近一单），给 secretary_lanes 用。 */
+export function laneSummary(db, lane, { limit = 1 } = {}) {
+  if (!lane) return null
+  let last = null
+  try {
+    last = db.prepare(
+      'SELECT id, status, topic, substr(intent, 1, 80) AS intent, updated_at FROM workitems WHERE lane_id = ? ORDER BY updated_at DESC LIMIT 1',
+    ).get(lane.id) || null
+  } catch { last = null }
+  let tasks = 0
+  try { tasks = db.prepare('SELECT COUNT(*) AS c FROM workitems WHERE lane_id = ?').get(lane.id).c } catch { tasks = 0 }
+  return {
+    id: lane.id,
+    label: lane.label,
+    workspace: lane.workspace,
+    status: lane.status,
+    workerSessionId: lane.sessionId,
+    permission: lane.permission,
+    tasks,
+    lastUsedAt: lane.lastUsedAt,
+    lastTask: last ? { id: last.id, status: last.status, topic: last.topic, intent: last.intent, updatedAt: last.updated_at } : null,
+  }
 }
