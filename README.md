@@ -106,7 +106,7 @@ Worker 会话（独立工具面 + 白名单 + 审批）
 plugin/                 # DSH Host 插件（内核）
   index.js              # 工具、HTTP、定时器、守卫
   client.js             # 右下角胶囊面板
-  src/                  # 状态机、DB、派单、守卫、判断器、记录表…
+  src/                  # 状态机、DB、派单、守卫、判断器、记录…
   tests/                # 单元测试（node:test，进程内跑）
   cordis.patch.yml      # Relay / Worker preset 与默认配置
 tools/db-backup.mjs     # 一致性备份：VACUUM INTO 单文件快照 + integrity/schema 校验
