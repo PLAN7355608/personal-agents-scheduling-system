@@ -45,6 +45,10 @@ PASS 的做法是把「对话」和「干活」拆开：
 | 工具治理 | 工人工具白名单 → 规则/裁判（judge）→ 主人审批；系统边界（hosts、系统目录、提权命令）强制人工批准 |
 | 删除护栏 | 删除类命令限制范围与规模，超阈值升级审批，全程审计 |
 | 异步派单 | 建完即返回，不阻塞对话；结果可回到来源会话（`guiNotify` 开关，默认关） |
+| 线接续 | 新任务可指定 `lane=lane_xxx` 或上一单 `wi_xxx`，同一条线永远是同一个工人（冷启动会 resume，不丢上下文） |
+| 续作审计 | 主人直接在工人会话里追加的指导也算账本事件；指导后的产物按版本登记，`item.reopened` 记录"又改了几轮" |
+| 成本账本 | 从工人会话日志抽 token 用量，按可配置单价折算人民币，面板看今日/本月花费 |
+| 数据安全 | `tools/db-backup.mjs` 出一致性单文件快照（含未 checkpoint 的 WAL），`tools/db-restore.mjs` 校验后原子还原并留 `.bak` |
 | 账本副作用 | 简报、复盘、归档（默认只提议）、模板、记忆、人设 |
 
 ## 架构一览
@@ -105,6 +109,8 @@ plugin/                 # DSH Host 插件（内核）
   src/                  # 状态机、DB、派单、守卫、判断器、记录表…
   tests/                # 单元测试（node:test，进程内跑）
   cordis.patch.yml      # Relay / Worker preset 与默认配置
+tools/db-backup.mjs     # 一致性备份：VACUUM INTO 单文件快照 + integrity/schema 校验
+tools/db-restore.mjs    # 演练还原：校验 → 旧库另存 .bak → 原子替换 → 复核
 assets/arch-v0.4.html   # 可交互架构图
 docs/ARCHITECTURE.md    # 架构说明
 ```
