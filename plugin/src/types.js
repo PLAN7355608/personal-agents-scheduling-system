@@ -1,7 +1,7 @@
 // 常量与契约：状态、事件、交付等级、schema 版本。
 // 所有"魔法字符串"只允许在这里出现，别的模块一律 import。
 
-export const SCHEMA_VERSION = 18;
+export const SCHEMA_VERSION = 19;
 
 /** 多用户缝：v0 恒为 'owner'，但代码里不许出现单用户隐含假设 */
 export const OWNER_DEFAULT = 'owner';
@@ -11,6 +11,7 @@ export const ITEM_STATUS = Object.freeze({
   TRIAGED: 'triaged',
   QUEUED: 'queued',
   RUNNING: 'running',
+  SUBMITTED: 'submitted',
   BLOCKED: 'blocked',
   WAITING_HUMAN: 'waiting_human',
   DONE: 'done',
@@ -35,9 +36,17 @@ export const TRANSITIONS = Object.freeze({
   [ITEM_STATUS.TRIAGED]: [ITEM_STATUS.QUEUED, ITEM_STATUS.WAITING_HUMAN, ITEM_STATUS.CANCELLED, ITEM_STATUS.MERGED],
   [ITEM_STATUS.QUEUED]: [ITEM_STATUS.RUNNING, ITEM_STATUS.BLOCKED, ITEM_STATUS.WAITING_HUMAN, ITEM_STATUS.CANCELLED, ITEM_STATUS.MERGED],
   [ITEM_STATUS.RUNNING]: [
+    ITEM_STATUS.SUBMITTED,
     ITEM_STATUS.DONE,
     ITEM_STATUS.FAILED,
     ITEM_STATUS.BLOCKED,
+    ITEM_STATUS.CANCELLED,
+  ],
+  // 提交待验收：done 只能由验收通过进入；驳回回到 running（附理由，触发一次 continuation）
+  [ITEM_STATUS.SUBMITTED]: [
+    ITEM_STATUS.DONE,
+    ITEM_STATUS.RUNNING,
+    ITEM_STATUS.FAILED,
     ITEM_STATUS.CANCELLED,
   ],
   [ITEM_STATUS.BLOCKED]: [
@@ -62,6 +71,14 @@ export const EVENT_TYPE = Object.freeze({
   ITEM_CREATED: 'item.created',
   ITEM_STATE: 'item.state',
   ITEM_FINISHED: 'item.finished',
+  ITEM_SUBMITTED: 'item.submitted',
+  ITEM_REJECTED: 'item.rejected',
+  ITEM_ACCEPTED: 'item.accepted',
+  SCHEDULE_FIRED: 'schedule.fired',
+  SCHEDULE_MISSED: 'schedule.missed',
+  SCHEDULE_SKIPPED: 'schedule.skipped',
+  RESOURCE_SAMPLE: 'resource.sample',
+  FILE_LEASE: 'file.lease',
   ITEM_METRICS: 'item.metrics',
   MEMORY_REMEMBER: 'memory.remember',
   MEMORY_FORGET: 'memory.forget',

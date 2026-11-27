@@ -14,10 +14,18 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { getSchemaVersion, openDb } from './src/db.js'
 import { appendEvent, countEvents, readEvents } from './src/events.js'
 import {
-  cancelWorkItem, createWorkItem, finishWorkItem, failWorkItem, getWorkItem, isTerminal, listMergeMembers, mergeWorkItems, splitMerged,
+  acceptWorkItem, cancelWorkItem, createWorkItem, finishWorkItem, failWorkItem, getWorkItem, isTerminal, listMergeMembers, mergeWorkItems,
+  normalizeReviewMode, rejectWorkItem, REVIEW_MODES, submitWorkItem, validateSubmission, splitMerged,
   listWorkItems, rebuildProjection, summaryCounts, transition,
 } from './src/workitems.js'
 import { dispatchWorker, listModelCatalog, parseModelRef, promptSession, svc } from './src/dispatch.js'
+import { reviewSubmissionWithModel } from './src/review.js'
+import { acquireLease, expireLeases, releaseItemLeases } from './src/leases.js'
+import { applyHysteresis, decideAdmission, isOverloaded, planConcurrency, probeHardware, sampleUsage } from './src/resources.js'
+import {
+  armAfterTask, attachOccurrence, claimOccurrence, createSchedule, dueSchedules, getSchedule, listSchedules,
+  removeSchedule, setScheduleStatus,
+} from './src/scheduler.js'
 import { recoverOnStart } from './src/recovery.js'
 import { decideDelivery, deliveryBudget } from './src/reporter.js'
 import { classifyTopic } from './src/topic.js'
@@ -97,6 +105,10 @@ const DEFAULTS = {
   workerDefaultSelection: null,
   defaultScopeMode: 'suggest',
   projects: [],
+  // 验收：self 提交即完成 | auto/model 只读核对 | owner 等主人点
+  review: { mode: 'self', provider: 'deepseek-account', model: 'deepseek-flash', timeoutMs: 20000 },
+  // 资源并发：内存硬闸门 + CPU 软上限（详见 13 号设计文档）
+  resources: { maxConcurrentWorkers: 4, reserveMB: 512, peakMB: 700, cpuFactor: 0.6, confirmRounds: 3 },
 }
 
 const JSON_OUTPUT = {
@@ -134,7 +146,135 @@ export function apply(ctx, config) {
   }
 
   const db = openDb({ path: cfg.dbPath })
-  const state = { startedAt: Date.now(), lastError: null, running: new Map() }
+  const state = {
+    startedAt: Date.now(),
+    lastError: null,
+    running: new Map(),
+    hardware: null,
+    sample: null,
+    plan: null,
+    concurrency: { current: 1, streak: 0 },
+    overloaded: false,
+  }
+  let lastResourceAt = 0
+
+  function runningWorkerCount() {
+    try {
+      return Number(db.prepare("SELECT COUNT(*) AS c FROM workitems WHERE status = 'running'").get().c || 0)
+    } catch {
+      return 0
+    }
+  }
+
+  /** 30s 心跳：采一次资源 → 重算并发（降立即生效、升要连续确认）→ 过载判定。 */
+  function refreshResources(now = Date.now()) {
+    if (now - lastResourceAt < 30000) return
+    lastResourceAt = now
+    try {
+      state.sample = sampleUsage({})
+      const plan = planConcurrency({ hardware: state.hardware, sample: state.sample, running: runningWorkerCount() })
+      state.plan = plan
+      const h = applyHysteresis({
+        current: state.concurrency.current,
+        desired: plan.desired,
+        streak: state.concurrency.streak,
+        confirmRounds: Number(cfg.resources && cfg.resources.confirmRounds) || 3,
+      })
+      if (h.changed) log('并发调整：' + state.concurrency.current + ' → ' + h.next + '（' + plan.reason + '）')
+      state.concurrency = { current: h.next, streak: h.streak }
+      state.overloaded = isOverloaded(state.sample, cfg.resources).overloaded
+      if (state.overloaded) log('资源过载信号：暂时收紧派单')
+    } catch (err) {
+      log('资源采样失败：' + describeError(err))
+    }
+  }
+
+  // 启动时采一次设备情况（异步，不阻塞加载）
+  probeHardware({})
+    .then((h) => {
+      state.hardware = h
+      log('硬件：' + h.cores + ' 核 / ' + h.totalMB + 'MB 内存 / ' + (h.gpu ? 'GPU ' + h.gpu.name : 'GPU 未检测'))
+      refreshResources(Date.now())
+    })
+    .catch((err) => log('硬件探测失败：' + describeError(err)))
+
+  /** 到点的计划：认领（幂等）→ 建任务 → 走同一条派单路。 */
+  function fireDueSchedules() {
+    let due = []
+    try {
+      due = dueSchedules(db, { now: Date.now(), limit: 5 })
+    } catch { return }
+    for (const s of due) {
+      const now = Date.now()
+      if (s.cooldownUntil && now < s.cooldownUntil) continue
+      if (s.maxPerDay) {
+        try {
+          const d = new Date()
+          d.setHours(0, 0, 0, 0)
+          const n = Number(db.prepare('SELECT COUNT(*) AS c FROM occurrences WHERE schedule_id = ? AND fired_at >= ?').get(s.id, d.getTime()).c || 0)
+          if (n >= Number(s.maxPerDay)) {
+            appendEvent(db, {
+              type: EVENT_TYPE.SCHEDULE_SKIPPED,
+              ownerId: cfg.ownerId,
+              actor: ACTOR.SYSTEM,
+              payload: { scheduleId: s.id, reason: '今日已达上限 ' + s.maxPerDay, firedToday: n },
+            })
+            // 推到下一次，避免每 30 秒重复判断
+            try { claimOccurrence(db, s, { now }) } catch { /* ignore */ }
+            continue
+          }
+        } catch { /* ignore */ }
+      }
+      let claim = null
+      try {
+        claim = claimOccurrence(db, s, { now })
+      } catch (err) {
+        log('计划认领失败：' + describeError(err))
+        continue
+      }
+      if (!claim.claimed) continue
+      const tpl = s.template || {}
+      try {
+        const laneId = tpl.lane ? (findLaneRef(db, tpl.lane) || {}).id || null : null
+        const { item } = createWorkItem(db, {
+          ownerId: cfg.ownerId,
+          channel: 'gui',
+          peer: cfg.ownerId,
+          kind: 'task',
+          intent: String(tpl.text),
+          inputs: [],
+          permission: normalizeWorkerPermission(tpl.permission, cfg.workerPermissionPreset),
+          laneId,
+          workspace: tpl.workspace || cfg.workspaceRoot,
+          origin: 'schedule',
+          topic: tpl.topic || classifyTopic(String(tpl.text)),
+          model: tpl.model || null,
+          reviewMode: tpl.reviewMode || null,
+          acceptance: parseAcceptanceLines(tpl.acceptance),
+        })
+        transition(db, item.id, ITEM_STATUS.TRIAGED, { reason: 'schedule: ' + s.id })
+        transition(db, item.id, ITEM_STATUS.QUEUED, { reason: 'route: schedule' })
+        attachOccurrence(db, claim.occurrenceKey, item.id)
+        appendEvent(db, {
+          type: EVENT_TYPE.SCHEDULE_FIRED,
+          ownerId: cfg.ownerId,
+          workitemId: item.id,
+          actor: ACTOR.SYSTEM,
+          payload: {
+            scheduleId: s.id,
+            title: s.title,
+            occurrenceKey: claim.occurrenceKey,
+            scheduledFor: claim.scheduledFor,
+            latencyMs: Math.max(0, now - claim.scheduledFor),
+            nextRunAt: (getSchedule(db, s.id) || {}).nextRunAt || null,
+          },
+        })
+        scheduleDispatch(getWorkItem(db, item.id))
+      } catch (err) {
+        log('定时触发建任务失败：' + describeError(err))
+      }
+    }
+  }
   const pendingDispatch = new Map()
   const strayTimers = new Set()
   ctx.effect(() => () => {
@@ -317,6 +457,11 @@ export function apply(ctx, config) {
 
   /** 有线走线：线内串行（忙就排队），线间并行。 */
   function dispatchOrQueue(fresh) {
+    // 资源准入：并发已满就先排队，等 watchdog 重新拉起（不丢任务、不打死机器）
+    try {
+      const adm = decideAdmission({ plan: state.plan, running: runningWorkerCount() })
+      if (!adm.allow) { log('排队等资源：' + fresh.id + '（' + adm.reason + '）'); return }
+    } catch { /* 资源探测失败不拦派单 */ }
     if (!fresh.laneId) { legacyDispatch(fresh); return }
     let lane = null
     try { lane = getLaneById(db, fresh.laneId) } catch { lane = null }
@@ -486,6 +631,40 @@ export function apply(ctx, config) {
     }
   }
 
+  // 证据行：kind|ref|摘要（只给路径也认，kind 默认 file）
+  function parseEvidenceLines(raw) {
+    return String(raw || '')
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const parts = line.split('|').map((x) => x.trim())
+        if (parts.length >= 2) return { kind: parts[0] || 'file', ref: parts[1], summary: parts.slice(2).join(' ') || '' }
+        return { kind: 'file', ref: line, summary: '' }
+      })
+  }
+
+  /** 验收清单：每行一条 → [{id,text,done:false}] */
+  function parseAcceptanceLines(raw) {
+    const lines = String(raw || '')
+      .split('\n')
+      .map((s) => s.trim().replace(/^[-*\d.、\s]+/, ''))
+      .filter(Boolean)
+    if (!lines.length) return null
+    return lines.map((text, i) => ({ id: 'a' + (i + 1), text, done: false }))
+  }
+
+  /** 验收模式：任务显式 > 线的设置 > 全局默认 */
+  function effectiveReviewMode(item) {
+    const fromItem = item && item.reviewMode ? normalizeReviewMode(item.reviewMode, '') : ''
+    if (fromItem) return fromItem
+    try {
+      const lane = item && item.laneId ? getLaneById(db, item.laneId) : null
+      if (lane && lane.reviewMode) return normalizeReviewMode(lane.reviewMode, 'self')
+    } catch { /* ignore */ }
+    return normalizeReviewMode(cfg.review && cfg.review.mode, 'self')
+  }
+
   // 终态任务的工人默认停手；但主人在会话里手动发消息（批注/改稿）后，视为“接手”，放行工具
   const manualTakeoverCache = new Map()
   function manualTakeover(sessionId, item) {
@@ -651,6 +830,8 @@ export function apply(ctx, config) {
       model: { type: 'string', description: '可选：指定工人模型，格式 provider/model（如 zai/glm-5.3、moonshotai-cn/kimi-k3）。不填则按 topic/配置/默认走' },
       notify: { type: 'boolean', description: '可选：这一单完成后是否回灌到当前对话（覆盖全局 guiNotify 开关）' },
       force: { type: 'boolean', description: '可选：确实要再派一单同类任务时传 true（绕过去重）' },
+      acceptance: { type: 'string', description: '可选：验收清单，每行一条（如「名单里 60 人都有手机号」「格式按文档规范」）。验收模式非 self 时工人必须逐条完成并提交证据' },
+      review_mode: { type: 'string', description: '可选：self（提交即完成）| auto（只读模型核对）| owner（等主人点）| model（预留）。不填按线/全局默认' },
     },
     output: JSON_OUTPUT,
     async execute(args, exec) {
@@ -663,10 +844,28 @@ export function apply(ctx, config) {
       if (ws.error) return { ok: false, message: ws.error }
       let cwd = ws.cwd
 
+      // 拆子任务：parent 必须是同一条线上的一级任务（只允许一层，避免任务树失控）
+      const laneRefRaw = String(args?.lane || '').trim()
+      const parentRef = String(args?.parent || '').trim()
+      let parentItem = null
+      if (parentRef) {
+        parentItem = getWorkItem(db, parentRef)
+        if (!parentItem) return { ok: false, message: '父任务不存在：' + parentRef }
+        if (parentRef === laneRefRaw) return { ok: false, message: '父任务不能是自己' }
+        if (parentItem.parentId) return { ok: false, message: '只支持一层拆分：父任务 ' + parentRef + ' 本身已经是子任务' }
+        if (parentItem.status && isTerminal(parentItem.status)) {
+          return { ok: false, message: '父任务已终态（' + parentItem.status + '），不能再拆子任务' }
+        }
+      }
+
       // 显式接续某条线（lane_xxx 或上一单 wi_xxx）：新任务挂过去，由同一个工人接着干
       let laneExplicit = null
       let laneSource = 'auto'
-      const laneRefRaw = String(args?.lane || '').trim()
+      if (parentItem && !laneRefRaw && parentItem.laneId) {
+        // 子任务默认落在父任务那条线上（同线串行天然保证顺序）
+        laneExplicit = getLaneById(db, parentItem.laneId)
+        if (laneExplicit) laneSource = 'parent'
+      }
       if (laneRefRaw) {
         const found = findLaneRef(db, laneRefRaw)
         if (!found) {
@@ -783,6 +982,9 @@ export function apply(ctx, config) {
         scopeConfidence: scoped.confidence,
         topic: args?.topic ? String(args.topic) : classifyTopic(text),
         model: args?.model ? String(args.model) : null,
+        parentId: args?.parent ? String(args.parent) : null,
+        reviewMode: args?.review_mode ? normalizeReviewMode(args.review_mode, '') || null : null,
+        acceptance: parseAcceptanceLines(args?.acceptance),
         sourceSessionId,
         notify: args?.notify === true ? true : false,
       })
@@ -1162,11 +1364,15 @@ export function apply(ctx, config) {
   ctx.tools.register(defineTool({
     name: 'secretary_work_finish',
     description:
-      '【工人专用】声明任务完成并写入结果事件。不调用它，任务永远不会被判成功。',
+      '【工人专用】声明任务完成并写入结果事件。不调用它，任务永远不会被判成功。验收模式不是 self 时，提交必须带 evidence。',
     parameters: {
       workitem_id: { type: 'string', required: true, description: '派单里给的任务 ID' },
       result: { type: 'string', required: true, description: '一句话结论 + 关键产物路径' },
       artifacts: { type: 'string', description: '产物路径，多个用换行分隔（可选）' },
+      evidence: {
+        type: 'string',
+        description: '证据，每行一条，格式 kind|ref|摘要（如 file|/root/x.xlsx|更新后的名单）。验收模式 self 时可选，其余模式必填',
+      },
     },
     output: JSON_OUTPUT,
     async execute(args) {
@@ -1175,14 +1381,53 @@ export function apply(ctx, config) {
       try {
         closeWorkerSessions(id)
         const arts = String(args?.artifacts || '').split('\n').map((s) => s.trim()).filter(Boolean)
-        const item = finishWorkItem(db, id, {
+        const evidence = parseEvidenceLines(args?.evidence)
+        const mode = effectiveReviewMode(getWorkItem(db, id))
+        if (mode !== 'self' && !evidence.length) {
+          return { ok: false, message: '这条线的验收模式是 ' + mode + '：提交必须带 evidence（每行 kind|ref|摘要）' }
+        }
+        const submitted = submitWorkItem(db, id, {
           result: String(args?.result || ''),
           artifacts: arts,
+          evidence,
+          reviewMode: mode,
         })
-        await notifyDelivery(item, 'done', { artifacts: arts })
+        if (!submitted.submitted) return { ok: false, message: submitted.reason || '提交被拒绝' }
+        let item = submitted.item
+
+        // auto/model：提交后立刻让验收员核对；验收器不可用就留在 submitted 等主人，绝不自动通过
+        if (mode === 'auto' || mode === 'model') {
+          const verdict = await reviewSubmissionWithModel({ llm: svc(ctx, 'llm'), cfg, item })
+          if (!verdict.unavailable) {
+            if (verdict.pass) {
+              item = acceptWorkItem(db, id, { by: 'auto', note: verdict.reason })
+              await notifyDelivery(item, 'done', { artifacts: arts })
+              laneReleaseAndPump(item.laneId)
+              backfillLane(item)
+              return { ok: true, workitem_id: id, status: item.status, accepted: true, message: '验收通过：' + (verdict.reason || '') }
+            }
+            item = rejectWorkItem(db, id, { reason: verdict.reason || '验收未通过', by: 'auto' })
+            return {
+              ok: false,
+              workitem_id: id,
+              status: item.status,
+              rejected: true,
+              reason: verdict.reason,
+              failed: verdict.failed || [],
+              message: '验收未通过，已退回继续改：' + (verdict.reason || ''),
+            }
+          }
+        }
+
+        await notifyDelivery(item, 'submitted')
         laneReleaseAndPump(item.laneId)
         backfillLane(item)
-        return { ok: true, workitem_id: id, status: item.status, message: '已记录完成：' + id }
+        return {
+          ok: true,
+          workitem_id: id,
+          status: item.status,
+          message: '已提交待验收（' + mode + '）：' + id,
+        }
       } catch (err) {
         return { ok: false, message: '记录完成失败：' + describeError(err) }
       }
@@ -1209,6 +1454,150 @@ export function apply(ctx, config) {
         return { ok: true, workitem_id: id, status: item.status, message: '已记录失败：' + id }
       } catch (err) {
         return { ok: false, message: '记录失败失败：' + describeError(err) }
+      }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'secretary_review',
+    description:
+      '看待验收的提交并处理：action=list 列出（默认）；accept 通过；reject 驳回（必须写理由，任务退回继续改）。验收模式 self 的线一般用不到。',
+    parameters: {
+      action: { type: 'string', description: 'list（默认）| accept | reject' },
+      workitem_id: { type: 'string', description: 'accept / reject 时的任务 ID' },
+      reason: { type: 'string', description: 'reject 的理由（必填）' },
+      note: { type: 'string', description: 'accept 的备注（可选）' },
+      limit: { type: 'number', description: 'list 条数，默认 10，最大 50' },
+    },
+    output: JSON_OUTPUT,
+    async execute(args) {
+      const action = String(args?.action || 'list').toLowerCase()
+      const id = String(args?.workitem_id || '').trim()
+      try {
+        if (action === 'accept') {
+          if (!id) return { ok: false, message: 'workitem_id 不能为空' }
+          const item = acceptWorkItem(db, id, { note: String(args?.note || ''), by: ACTOR.OWNER })
+          await notifyDelivery(item, 'done')
+          laneReleaseAndPump(item.laneId)
+          backfillLane(item)
+          return { ok: true, workitem_id: id, status: item.status, message: '已验收通过：' + id }
+        }
+        if (action === 'reject') {
+          if (!id) return { ok: false, message: 'workitem_id 不能为空' }
+          const reason = String(args?.reason || '').trim()
+          if (!reason) return { ok: false, message: '驳回必须写理由' }
+          const item = rejectWorkItem(db, id, { reason, by: ACTOR.OWNER })
+          return {
+            ok: true,
+            workitem_id: id,
+            status: item.status,
+            message: '已驳回并退回继续改：' + reason + '。可对同一工人用 secretary_steer_worker 补充意见。',
+          }
+        }
+        const limit = Math.max(1, Math.min(50, Number(args?.limit) || 10))
+        const rows = db.prepare(
+          "SELECT id, lane_id, intent, result, acceptance, evidence, submitted_at, review_mode FROM workitems WHERE status = 'submitted' ORDER BY submitted_at ASC LIMIT ?",
+        ).all(limit)
+        return {
+          ok: true,
+          pending: rows.map((r) => ({
+            id: r.id,
+            laneId: r.lane_id,
+            reviewMode: r.review_mode,
+            intent: String(r.intent || '').slice(0, 120),
+            result: String(r.result || '').slice(0, 300),
+            acceptance: r.acceptance ? JSON.parse(r.acceptance) : [],
+            evidence: r.evidence ? JSON.parse(r.evidence) : [],
+            submittedAt: r.submitted_at,
+          })),
+          message: rows.length ? '有 ' + rows.length + ' 单待验收（accept/reject 传 workitem_id）' : '没有待验收的提交',
+        }
+      } catch (err) {
+        return { ok: false, message: '验收操作失败：' + describeError(err) }
+      }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'secretary_schedule',
+    description:
+      '定时计划：action=list 看计划；add 新建（kind=every 给 cron+tz；kind=at 给 at 毫秒时间戳；kind=after_task 给 anchor_task_id+delay_s）；pause/resume/remove 管计划。触发时按 template 参数派任务。',
+    parameters: {
+      action: { type: 'string', description: 'list（默认）| add | pause | resume | remove' },
+      id: { type: 'string', description: 'pause/resume/remove 的计划 id' },
+      title: { type: 'string', description: 'add：计划标题' },
+      kind: { type: 'string', description: 'add：every（默认）| at | after_task' },
+      cron: { type: 'string', description: 'add（every）：5 段 cron，如 "0 20 * * *"' },
+      tz: { type: 'string', description: 'add：IANA 时区，默认 Asia/Shanghai' },
+      at: { type: 'number', description: 'add（at）：绝对时间 epoch ms' },
+      anchor_task_id: { type: 'string', description: 'add（after_task）：锚点任务 id' },
+      delay_s: { type: 'number', description: 'add（after_task）：锚点完成后多少秒触发' },
+      text: { type: 'string', description: 'add：触发时派什么活（必填）' },
+      workspace: { type: 'string', description: 'add：工作区' },
+      topic: { type: 'string', description: 'add：任务分类' },
+      model: { type: 'string', description: 'add：provider/model' },
+      lane: { type: 'string', description: 'add：要接续的线（lane_xxx 或 wi_xxx）' },
+      max_per_day: { type: 'number', description: 'add：每天最多触发几次' },
+      cooldown_s: { type: 'number', description: 'add：两次触发最小间隔（秒）' },
+    },
+    output: JSON_OUTPUT,
+    async execute(args) {
+      const action = String(args?.action || 'list').toLowerCase()
+      try {
+        if (action === 'add') {
+          const s = createSchedule(db, {
+            title: args?.title,
+            kind: args?.kind || 'every',
+            cron: args?.cron || null,
+            tz: args?.tz || 'Asia/Shanghai',
+            at: args?.at || null,
+            anchorTaskId: args?.anchor_task_id || null,
+            delayS: args?.delay_s || 0,
+            catchup: 'skip',
+            maxPerDay: args?.max_per_day || null,
+            cooldownS: args?.cooldown_s || null,
+            ownerId: cfg.ownerId,
+            template: {
+              text: String(args?.text || ''),
+              workspace: args?.workspace || null,
+              topic: args?.topic || null,
+              model: args?.model || null,
+              lane: args?.lane || null,
+            },
+          })
+          return { ok: true, schedule: s, message: '已建计划 ' + s.id + '（下次 ' + (s.nextRunAt ? new Date(s.nextRunAt).toISOString() : '等锚点任务') + '）' }
+        }
+        if (action === 'pause' || action === 'resume') {
+          const id = String(args?.id || '').trim()
+          if (!id) return { ok: false, message: 'id 不能为空' }
+          const s = setScheduleStatus(db, id, action === 'pause' ? 'paused' : 'active')
+          return { ok: true, schedule: s, message: (action === 'pause' ? '已暂停 ' : '已恢复 ') + id }
+        }
+        if (action === 'remove') {
+          const id = String(args?.id || '').trim()
+          if (!id) return { ok: false, message: 'id 不能为空' }
+          const removed = removeSchedule(db, id)
+          return { ok: removed, message: (removed ? '已删除 ' : '没找到 ') + id }
+        }
+        const rows = listSchedules(db, { limit: 20 })
+        return {
+          ok: true,
+          schedules: rows.map((s) => ({
+            id: s.id,
+            title: s.title,
+            kind: s.kind,
+            cron: s.cron,
+            tz: s.tz,
+            nextRunAt: s.nextRunAt,
+            nextRunLocal: s.nextRunAt ? new Date(s.nextRunAt).toLocaleString('sv-SE', { timeZone: s.tz || 'Asia/Shanghai' }) : null,
+            status: s.status,
+            text: String((s.template && s.template.text) || '').slice(0, 80),
+          })),
+          concurrency: { plan: state.plan, current: state.concurrency.current, overloaded: state.overloaded },
+          message: '共 ' + rows.length + ' 个计划',
+        }
+      } catch (err) {
+        return { ok: false, message: '定时计划操作失败：' + describeError(err) }
       }
     },
   }))
@@ -1759,6 +2148,20 @@ export function apply(ctx, config) {
                 return '这个任务已经是 ' + w.status + ' 状态，立即停止，不要再调用任何工具，也不要继续修改系统或文件。'
               }
             }
+            // 文件写租约：同路径同时只允许一个任务写（读不限）
+            try {
+              if ((name === 'write' || name === 'edit') && row.workitem_id) {
+                const leaseArgs = exec?.arguments ?? exec?.args ?? exec?.input
+                const target = leaseArgs && typeof leaseArgs === 'object' ? (leaseArgs.file_path || leaseArgs.path) : null
+                if (target) {
+                  const lease = acquireLease(db, { path: target, workitemId: row.workitem_id })
+                  if (!lease.ok) {
+                    log('文件租约冲突：' + target + ' 被 ' + lease.holder + ' 占用')
+                    return '这个文件正被另一个任务（' + lease.holder + '）写入：' + target + '。等它完成或换文件，不要强行覆盖。'
+                  }
+                }
+              }
+            } catch { /* 租约失败不阻塞 */ }
             // 系统保护边界：写系统目录 / 提权命令，必须走工具申请，不许工人悄悄改
             try {
               const rawArgs0 = exec?.arguments ?? exec?.args ?? exec?.input
@@ -2019,7 +2422,55 @@ export function apply(ctx, config) {
 
             let body
             if (path === '/status' || path === '/') {
-              body = { ok: true, dbPath: cfg.dbPath, schemaVersion: getSchemaVersion(db), events: countEvents(db), counts: summaryCounts(db), lastError: state.lastError, startedAt: state.startedAt, clientHalf: clientHalfInfo(), reporter: deliveryBudget(db, { ownerId: cfg.ownerId, budget: cfg.reporter.dailyL3Budget }), outbox: outboxSummary() }
+              body = { ok: true, dbPath: cfg.dbPath, schemaVersion: getSchemaVersion(db), events: countEvents(db), counts: summaryCounts(db), lastError: state.lastError, startedAt: state.startedAt, clientHalf: clientHalfInfo(), reporter: deliveryBudget(db, { ownerId: cfg.ownerId, budget: cfg.reporter.dailyL3Budget }), outbox: outboxSummary(), hardware: state.hardware, resources: { sample: state.sample, plan: state.plan, concurrency: state.concurrency.current, overloaded: state.overloaded }, schedules: listSchedules(db, { limit: 10 }).length }
+            } else if (path === '/tree') {
+              // 任务树 + 线时间条：给面板/看板画泳道与 outline，纯数据
+              const limit = Math.max(1, Math.min(500, Number(url.searchParams.get('limit')) || 200))
+              const rows = db.prepare('SELECT * FROM workitems ORDER BY created_at DESC LIMIT ?').all(limit)
+              const nodes = new Map()
+              for (const row of rows) {
+                const acc = row.acceptance ? JSON.parse(row.acceptance) : []
+                const ev = row.evidence ? JSON.parse(row.evidence) : []
+                nodes.set(row.id, {
+                  id: row.id,
+                  status: row.status,
+                  topic: row.topic,
+                  intent: String(row.intent || '').slice(0, 140),
+                  createdAt: Number(row.created_at),
+                  updatedAt: Number(row.updated_at),
+                  laneId: row.lane_id,
+                  parentId: row.parent_id,
+                  reviewMode: row.review_mode,
+                  submittedAt: row.submitted_at,
+                  acceptance: acc,
+                  evidenceCount: ev.length,
+                  result: String(row.result || '').slice(0, 300),
+                  children: [],
+                })
+              }
+              const roots = []
+              for (const node of nodes.values()) {
+                if (node.parentId && nodes.has(node.parentId)) nodes.get(node.parentId).children.push(node)
+                else roots.push(node)
+              }
+              const lanes = listLanes(db, { ownerId: cfg.ownerId, limit: 30 }).map((l) => {
+                const items = db.prepare(
+                  'SELECT id, status, created_at, updated_at, substr(intent, 1, 60) AS intent FROM workitems WHERE lane_id = ? ORDER BY created_at ASC LIMIT 100',
+                ).all(l.id)
+                const rev = db.prepare(
+                  'SELECT COUNT(*) AS c FROM revisions WHERE workitem_id IN (SELECT id FROM workitems WHERE lane_id = ?)',
+                ).get(l.id)
+                return {
+                  id: l.id,
+                  label: l.label,
+                  workspace: l.workspace,
+                  reviewMode: l.reviewMode,
+                  sessionId: l.sessionId,
+                  revisions: Number(rev.c),
+                  items: items.map((w) => ({ id: w.id, status: w.status, from: Number(w.created_at), to: Number(w.updated_at), intent: w.intent })),
+                }
+              })
+              body = { ok: true, generatedAt: Date.now(), counts: summaryCounts(db), roots, lanes }
             } else if (path === '/stats') {
               const days = Math.max(1, Math.min(90, Number(url.searchParams.get('days')) || 14))
               body = { ok: true, ...statsSummary(db, { ownerId: cfg.ownerId, days }), suggestions: divisionSuggestions(db, { ownerId: cfg.ownerId, days }).suggestions }
@@ -2196,6 +2647,16 @@ export function apply(ctx, config) {
         auditWorkerGuidanceLite()
         scanUsageLite()
         scanContinuationArtifacts()
+        refreshResources()
+        fireDueSchedules()
+        // 租约维护：过期清掉；任务终态后释放（1 小时窗口内的终态任务）
+        try { expireLeases(db) } catch { /* ignore */ }
+        try {
+          const recentTerminal = db.prepare(
+            "SELECT id FROM workitems WHERE status IN ('done','failed','cancelled') AND updated_at > ?",
+          ).all(Date.now() - 3600 * 1000)
+          for (const r of recentTerminal) releaseItemLeases(db, r.id)
+        } catch { /* ignore */ }
         // 线维护：空闲太久关会话；卡住的线自动释放；空线但有排队就拉起
         try {
           const closed = sweepIdleLanes(db, { ttlMs: Number(cfg.laneIdleTtlMs) || 30 * 60 * 1000 })

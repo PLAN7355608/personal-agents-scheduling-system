@@ -88,6 +88,16 @@ export function buildWorkerPrompt(item, cfg, facts = [], memberTexts = [], perso
   if (isWriting) {
     mandatory.push('', '【事实纪律】数字/事实要能追溯来源（本地文件或网页）；无法核实的写「正在/持续」或标「待核」；不得编造，不得把旧报道时点改成新月份。')
   }
+  const acceptance = Array.isArray(item.acceptance) ? item.acceptance : []
+  const reviewMode = String(item.reviewMode || 'self')
+  const reviewRules = reviewMode !== 'self'
+    ? [
+      '5. 这条线要验收（' + reviewMode + '）：work_finish 必须带 evidence，每行 kind|ref|摘要（如 file|/root/x.xlsx|更新后的名单；cmd|npm test|171 passed），空证据会被判无效。',
+      ...(acceptance.length
+        ? ['6. 验收清单（逐条做到，并在 evidence 里给出对应证据）：', ...acceptance.map((a) => '   - ' + (a.text || a.id))]
+        : []),
+    ]
+    : []
   const completion = [
     '',
     '【完成要求】',
@@ -95,10 +105,11 @@ export function buildWorkerPrompt(item, cfg, facts = [], memberTexts = [], perso
     '2. 做不了调 secretary_work_fail(workitem_id="' + item.id + '", reason="原因")。',
     '3. result 只写结论和路径：不寒暄、不加称呼、不解释过程。',
     '4. 不要反问、不要等确认。',
+    ...reviewRules,
     ...(isWriting || /docx?|xlsx?|pdf|渲染|预览/.test(fullText)
-      ? ['5. 文档/图片类产物可渲染自检，最多 ' + (Number(cfg.workerRenderMax) || 3) + ' 次；纯文本不用渲染；渲染失败可以修一次再渲，超预算就 work_fail 说明。']
+      ? ['7. 文档/图片类产物可渲染自检，最多 ' + (Number(cfg.workerRenderMax) || 3) + ' 次；纯文本不用渲染；渲染失败可以修一次再渲，超预算就 work_fail 说明。']
       : []),
-    ...(needsFiles ? ['6. 要删文件先列出待删清单再删；result 写清删了哪些。'] : []),
+    ...(needsFiles ? ['8. 要删文件先列出待删清单再删；result 写清删了哪些。'] : []),
   ]
 
   const optional = []

@@ -38,6 +38,8 @@ function toLane(row) {
     lastUsedAt: row.last_used_at,
     createdAt: row.created_at,
     meta: row.meta ? JSON.parse(row.meta) : null,
+    reviewMode: row.review_mode || null,
+    lastRevisionId: row.last_revision_id || null,
   }
 }
 
@@ -111,6 +113,12 @@ export function adoptSession(db, laneId, sessionId, { label = null, permission =
   db.prepare(
     'UPDATE lanes SET session_id = ?, permission = COALESCE(?, permission), label = COALESCE(?, label), meta = ?, last_used_at = ? WHERE id = ?',
   ).run(sessionId, permission, label, JSON.stringify(meta), Date.now(), laneId)
+  return getLaneById(db, laneId)
+}
+
+export function setLaneReview(db, laneId, mode) {
+  const v = ['self', 'auto', 'owner', 'model'].includes(String(mode || '')) ? String(mode) : null
+  db.prepare('UPDATE lanes SET review_mode = ? WHERE id = ?').run(v, laneId)
   return getLaneById(db, laneId)
 }
 

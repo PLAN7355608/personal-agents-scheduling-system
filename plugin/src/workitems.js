@@ -7,7 +7,7 @@ import { ACTOR, EVENT_TYPE, ITEM_STATUS, OWNER_DEFAULT, TERMINAL_STATUS, TRANSIT
 const COLUMNS = [
   'id', 'created_at', 'updated_at', 'owner_id', 'source_channel', 'source_peer', 'source_msg_id',
   'kind', 'intent', 'topic', 'status', 'priority', 'needs_human', 'deadline', 'budget',
-  'parent_id', 'worker_type', 'session_id', 'inputs', 'permission', 'lane_id', 'workspace', 'origin', 'project_root', 'scope', 'scope_source', 'scope_confidence', 'result', 'error', 'attempts', 'metrics', 'model', 'source_session_id', 'notify',
+  'parent_id', 'worker_type', 'session_id', 'inputs', 'permission', 'lane_id', 'workspace', 'origin', 'project_root', 'scope', 'scope_source', 'scope_confidence', 'result', 'error', 'attempts', 'metrics', 'model', 'source_session_id', 'notify', 'acceptance', 'evidence', 'submitted_at', 'review_mode',
 ]
 
 function snapshot(row) {
@@ -47,6 +47,10 @@ function snapshot(row) {
     model: row.model || null,
     sourceSessionId: row.source_session_id || null,
     notify: !!row.notify,
+    acceptance: row.acceptance ? safeJson(row.acceptance) : [],
+    evidence: row.evidence ? safeJson(row.evidence) : [],
+    submittedAt: row.submitted_at === null || row.submitted_at === undefined ? null : Number(row.submitted_at),
+    reviewMode: row.review_mode || null,
   }
 }
 
@@ -90,6 +94,10 @@ function toRow(w) {
     model: w.model ?? null,
     source_session_id: w.sourceSessionId ?? null,
     notify: w.notify ? 1 : 0,
+    acceptance: w.acceptance ? JSON.stringify(w.acceptance) : null,
+    evidence: w.evidence ? JSON.stringify(w.evidence) : null,
+    submitted_at: w.submittedAt ?? null,
+    review_mode: w.reviewMode ?? null,
   }
 }
 
@@ -172,7 +180,11 @@ function insertItemNoTx(db, opts) {
       needsHuman: false,
       deadline: null,
       budget,
-      parentId: null,
+      parentId: opts.parentId ?? null,
+      reviewMode: opts.reviewMode ?? null,
+      acceptance: opts.acceptance ?? null,
+      evidence: null,
+      submittedAt: null,
       workerType: null,
       sessionId: null,
       inputs: opts.inputs ?? null,
@@ -288,8 +300,122 @@ function stampMetrics(db, id, success) {
   }
 }
 
-export function finishWorkItem(db, id, { result, artifacts = [] } = {}) {
+/** 验收模式：self（提交即完成）| auto（另起只读工人核对）| owner（等主人点）| model（模型验收，接口预留） */
+export const REVIEW_MODES = ['self', 'auto', 'owner', 'model']
+
+export function normalizeReviewMode(value, fallback = 'self') {
+  const v = String(value || '').trim().toLowerCase()
+  return REVIEW_MODES.includes(v) ? v : fallback
+}
+
+/**
+ * 提交校验：必须有证据；验收项不得留未勾选。
+ * 目的：把「完成」从一句话变成可核对的结构，空证据 = 无效提交。
+ */
+export function validateSubmission({ acceptance = [], evidence = [] } = {}) {
+  const evidenceList = Array.isArray(evidence) ? evidence.filter((e) => e && (e.ref || e.summary)) : []
+  if (!evidenceList.length) {
+    return { ok: false, reason: '提交必须带 evidence（产物路径 / 命令输出摘要 / 文本证据），空证据不算完成' }
+  }
+  const open = (Array.isArray(acceptance) ? acceptance : []).filter((a) => a && a.done !== true)
+  if (open.length) {
+    return { ok: false, reason: '还有未勾选的验收项：' + open.map((a) => a.text || a.id).join('；') }
+  }
+  return { ok: true }
+}
+
+/**
+ * 提交。review_mode=self 直接完成；其余进 submitted 等验收。
+ * 返回 { item, submitted: boolean, reason? }
+ */
+export function submitWorkItem(db, id, {
+  result = '',
+  artifacts = [],
+  evidence = [],
+  acceptance = null,
+  reviewMode = 'self',
+  actor = ACTOR.WORKER,
+} = {}) {
+  const mode = normalizeReviewMode(reviewMode, 'self')
+  const item0 = getWorkItem(db, id)
+  if (!item0) throw new Error(`任务不存在：${id}`)
+  const accs = acceptance !== null ? acceptance : item0.acceptance
+  const check = validateSubmission({ acceptance: accs, evidence })
+  if (!check.ok) return { item: item0, submitted: false, reason: check.reason }
+
+  if (mode === 'self') {
+    const item = finishWorkItem(db, id, { result, artifacts, evidence, acceptance: accs, reviewMode: mode })
+    return { item, submitted: true, reviewMode: mode }
+  }
+
   return withTransaction(db, () => {
+    db.prepare('UPDATE workitems SET acceptance = ?, evidence = ?, review_mode = ?, submitted_at = ?, result = ? WHERE id = ?')
+      .run(JSON.stringify(accs || []), JSON.stringify(evidence || []), mode, Date.now(), String(result || ''), id)
+    const item = applyTransition(db, id, ITEM_STATUS.SUBMITTED, {
+      actor,
+      reason: 'worker submit（待验收：' + mode + '）',
+      payload: { result, artifacts, evidence, reviewMode: mode },
+    })
+    appendEvent(db, {
+      type: EVENT_TYPE.ITEM_SUBMITTED,
+      ownerId: item.ownerId,
+      workitemId: id,
+      channel: item.sourceChannel,
+      actor,
+      payload: { result, artifacts, evidence, reviewMode: mode },
+    })
+    return { item: getWorkItem(db, id), submitted: true, reviewMode: mode }
+  })
+}
+
+/** 验收通过：submitted → done。这是 review ≠ self 时唯一能进 done 的路径。 */
+export function acceptWorkItem(db, id, { note = '', by = ACTOR.OWNER } = {}) {
+  return withTransaction(db, () => {
+    const item = applyTransition(db, id, ITEM_STATUS.DONE, {
+      viaFinish: true,
+      actor: by,
+      reason: '验收通过' + (note ? '：' + note : ''),
+      payload: { acceptedBy: by, note },
+    })
+    appendEvent(db, {
+      type: EVENT_TYPE.ITEM_ACCEPTED,
+      ownerId: item.ownerId,
+      workitemId: id,
+      channel: item.sourceChannel,
+      actor: by,
+      payload: { note },
+    })
+    return getWorkItem(db, id)
+  })
+}
+
+/** 验收驳回：submitted → running，附理由；调用方负责触发一次 continuation。 */
+export function rejectWorkItem(db, id, { reason = '', by = ACTOR.OWNER } = {}) {
+  if (!String(reason || '').trim()) throw new Error('驳回必须写理由')
+  return withTransaction(db, () => {
+    const item = applyTransition(db, id, ITEM_STATUS.RUNNING, {
+      actor: by,
+      reason: '验收驳回：' + reason,
+      payload: { rejectedBy: by, rejectReason: reason },
+    })
+    appendEvent(db, {
+      type: EVENT_TYPE.ITEM_REJECTED,
+      ownerId: item.ownerId,
+      workitemId: id,
+      channel: item.sourceChannel,
+      actor: by,
+      payload: { reason },
+    })
+    return getWorkItem(db, id)
+  })
+}
+
+export function finishWorkItem(db, id, { result, artifacts = [], evidence = null, acceptance = null, reviewMode = null } = {}) {
+  return withTransaction(db, () => {
+    if (evidence !== null || acceptance !== null || reviewMode !== null) {
+      db.prepare('UPDATE workitems SET evidence = COALESCE(?, evidence), acceptance = COALESCE(?, acceptance), review_mode = COALESCE(?, review_mode), submitted_at = ? WHERE id = ?')
+        .run(evidence === null ? null : JSON.stringify(evidence), acceptance === null ? null : JSON.stringify(acceptance), reviewMode, Date.now(), id)
+    }
     const item = applyTransition(db, id, ITEM_STATUS.DONE, {
       viaFinish: true,
       actor: ACTOR.WORKER,

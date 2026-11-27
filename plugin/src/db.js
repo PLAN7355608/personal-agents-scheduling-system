@@ -7,6 +7,64 @@ import { SCHEMA_VERSION } from './types.js'
 
 const MIGRATIONS = [
   {
+    version: 19,
+    sql: `
+ALTER TABLE workitems ADD COLUMN acceptance TEXT;
+ALTER TABLE workitems ADD COLUMN evidence TEXT;
+ALTER TABLE workitems ADD COLUMN submitted_at INTEGER;
+ALTER TABLE workitems ADD COLUMN review_mode TEXT;
+ALTER TABLE lanes ADD COLUMN review_mode TEXT;
+ALTER TABLE lanes ADD COLUMN last_revision_id TEXT;
+
+-- 定时触发：next_run_at 是唯一调度依据，cron 只用来算它
+CREATE TABLE IF NOT EXISTS schedules (
+  id              TEXT PRIMARY KEY,
+  title           TEXT NOT NULL,
+  kind            TEXT NOT NULL,
+  cron            TEXT,
+  tz              TEXT,
+  at_ms           INTEGER,
+  anchor_task_id  TEXT,
+  delay_s         INTEGER,
+  next_run_at     INTEGER,
+  last_fired_at   INTEGER,
+  last_evaluated_at INTEGER,
+  status          TEXT NOT NULL DEFAULT 'active',
+  catchup         TEXT NOT NULL DEFAULT 'skip',
+  max_per_day     INTEGER,
+  cooldown_until  INTEGER,
+  template_json   TEXT NOT NULL,
+  version         INTEGER NOT NULL DEFAULT 0,
+  created_at      INTEGER NOT NULL,
+  updated_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sched_next ON schedules(status, next_run_at);
+
+-- 每次触发一条；occurrence_key 唯一索引是防重复触发的核心
+CREATE TABLE IF NOT EXISTS occurrences (
+  id             TEXT PRIMARY KEY,
+  schedule_id    TEXT NOT NULL,
+  occurrence_key TEXT NOT NULL UNIQUE,
+  scheduled_for  INTEGER NOT NULL,
+  fired_at       INTEGER,
+  latency_ms     INTEGER,
+  status         TEXT NOT NULL DEFAULT 'fired',
+  workitem_id    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_occ_sched ON occurrences(schedule_id, scheduled_for);
+
+-- 文件写租约：同路径同时只允许一个任务写
+CREATE TABLE IF NOT EXISTS file_leases (
+  path        TEXT PRIMARY KEY,
+  workitem_id TEXT NOT NULL,
+  mode        TEXT NOT NULL DEFAULT 'write',
+  acquired_at INTEGER NOT NULL,
+  expires_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lease_item ON file_leases(workitem_id);
+`,
+  },
+  {
     version: 1,
     sql: `
 CREATE TABLE IF NOT EXISTS schema_meta (
