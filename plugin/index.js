@@ -26,7 +26,7 @@ import {
   armAfterTask, attachOccurrence, claimOccurrence, createSchedule, dueSchedules, getSchedule, listSchedules,
   removeSchedule, setScheduleStatus,
 } from './src/scheduler.js'
-import { recoverOnStart } from './src/recovery.js'
+import { findSilentDispatches, recoverOnStart } from './src/recovery.js'
 import { decideDelivery, deliveryBudget } from './src/reporter.js'
 import { classifyTopic } from './src/topic.js'
 import { suggestions as divisionSuggestions, summarize as statsSummary } from './src/stats.js'
@@ -37,7 +37,7 @@ import { agentSessionId, buildWorkerToolEvent, redactText, toolNameOf } from './
 import { normalizeWorkerPermission, relayDenialMessage, relayToolAllowed, workerDenialMessage, workerToolAllowed } from './src/guard.js'
 import { resolveDbPath, resolveWorkspaceRoot } from './src/paths.js'
 import {
-  adoptSession, claimLane, ensureLane, findLaneRef, focusFromText, getLaneById, laneContext as laneRecentContext, laneKeyFor, listLanes,
+  adoptSession, claimLane, ensureLane, findLaneRef, focusFromText, getLaneById, laneContext as laneRecentContext, laneKeyFor, listLanes, setLaneMeta,
   nextQueuedOnLane, releaseLane, repairStuckLanes, sweepIdleLanes,
 } from './src/lanes.js'
 import { inferScope } from './src/scope.js'
@@ -53,6 +53,7 @@ import { protectedBoundaryReason } from './src/protected.js'
 import { pickDuplicate } from './src/dedupe.js'
 import { JUDGE_KIND, judgeToolDecision } from './src/judge.js'
 import { composeReply } from './src/language.js'
+import { listBoard, postBoard, removeBoard } from './src/board.js'
 import { buildBrief, buildReview, writeReport } from './src/briefing.js'
 import { applyArchive, scanArchive } from './src/archive.js'
 import { createHash, randomUUID } from 'node:crypto'
@@ -665,6 +666,20 @@ export function apply(ctx, config) {
     return normalizeReviewMode(cfg.review && cfg.review.mode, 'self')
   }
 
+  /** 线名跟随任务：自动命名的线跟着最近一单更新；手改过名的线（meta.autoLabel=false）不再覆盖。 */
+  function syncLaneLabel(laneId, intent) {
+    try {
+      const lane = laneId ? getLaneById(db, laneId) : null
+      if (!lane) return
+      const meta = lane.meta || {}
+      if (lane.label && meta.autoLabel !== true) return
+      const next = String(intent || '').replace(/\s+/g, ' ').trim().slice(0, 20)
+      if (!next) return
+      db.prepare('UPDATE lanes SET label = ? WHERE id = ?').run(next, laneId)
+      setLaneMeta(db, laneId, { autoLabel: true })
+    } catch { /* 命名失败不影响派单 */ }
+  }
+
   // 终态任务的工人默认停手；但主人在会话里手动发消息（批注/改稿）后，视为“接手”，放行工具
   const manualTakeoverCache = new Map()
   function manualTakeover(sessionId, item) {
@@ -916,6 +931,7 @@ export function apply(ctx, config) {
         }
       }
 
+      if (lane) syncLaneLabel(lane.id, text)
       // 路由诊断：记录这次任务为什么落在/该落在哪条线，供以后分析自动分线
       try {
         if (lane) {
@@ -1718,6 +1734,75 @@ export function apply(ctx, config) {
   }))
 
   ctx.tools.register(defineTool({
+    name: 'secretary_board_post',
+    description:
+      '【工人/Relay 共用】往共享黑板上贴一条：结论、事实、待办、决定或卡点。同一条线的其他工人和主人都能读到。' +
+      '黑板是共享状态不是聊天，一条别超过 4000 字；长内容写文件后贴路径。',
+    parameters: {
+      text: { type: 'string', required: true, description: '要贴上黑板的一句话/一段结论' },
+      kind: { type: 'string', description: 'note（默认）| fact | todo | decision | blocked' },
+      lane: { type: 'string', description: '可选：贴到哪条线（lane_xxx 或 wi_xxx）；不填则用当前任务所在的线' },
+      workitem_id: { type: 'string', description: '可选：这条贴子属于哪个任务（工人一般传派单里的任务 ID）' },
+      pinned: { type: 'boolean', description: '可选：钉住，任何线读黑板都能看到（适合全局约定）' },
+    },
+    output: JSON_OUTPUT,
+    async execute(args) {
+      const text = String(args?.text || '').trim()
+      if (!text) return { ok: false, message: 'text 不能为空' }
+      let laneId = null
+      const laneRef = String(args?.lane || '').trim()
+      if (laneRef) {
+        const found = findLaneRef(db, laneRef)
+        if (!found) return { ok: false, message: '找不到这条线：' + laneRef + '（可传 lane_xxx 或上一单的 wi_xxx）' }
+        laneId = found.id
+      }
+      const wi = String(args?.workitem_id || '').trim() || null
+      if (!laneId && wi) {
+        const item = getWorkItem(db, wi)
+        if (item && item.laneId) laneId = item.laneId
+      }
+      const r = postBoard(db, { ownerId: cfg.ownerId, laneId, workitemId: wi, kind: args?.kind, text, pinned: !!args?.pinned })
+      if (!r.ok) return { ok: false, message: r.reason }
+      return { ok: true, post: r.post, message: '已贴到黑板' + (laneId ? '（这条线）' : '（全局）') }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'secretary_board_read',
+    description: '读共享黑板：默认读当前任务所在线的最新贴子；给 lane 读指定线，给 all=true 读全量最近贴子。开工前先读一次，能避免重复劳动。',
+    parameters: {
+      lane: { type: 'string', description: '可选：哪条线（lane_xxx 或 wi_xxx）；不填则用当前任务所在的线' },
+      workitem_id: { type: 'string', description: '可选：用这个任务所在的线' },
+      kind: { type: 'string', description: '可选：只看某类，如 decision / todo（多个用逗号）' },
+      limit: { type: 'number', description: '最多几条，默认 30' },
+      all: { type: 'boolean', description: '可选：true = 不看线，读所有最近贴子' },
+    },
+    output: JSON_OUTPUT,
+    async execute(args) {
+      let laneId = null
+      const laneRef = String(args?.lane || '').trim()
+      if (laneRef) {
+        const found = findLaneRef(db, laneRef)
+        if (!found) return { ok: false, message: '找不到这条线：' + laneRef + '（可传 lane_xxx 或上一单的 wi_xxx）' }
+        laneId = found.id
+      }
+      const wi = String(args?.workitem_id || '').trim()
+      if (!laneId && wi) {
+        const item = getWorkItem(db, wi)
+        if (item && item.laneId) laneId = item.laneId
+      }
+      const kinds = String(args?.kind || '').split(',').map((s) => s.trim()).filter(Boolean)
+      const posts = listBoard(db, {
+        ownerId: cfg.ownerId,
+        laneId: args?.all ? null : laneId,
+        kinds: kinds.length ? kinds : null,
+        limit: args?.limit,
+      })
+      return { ok: true, laneId: args?.all ? null : laneId, count: posts.length, posts }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'secretary_prune',
     description: '清理旧的终态任务（done/failed/cancelled）。默认只预览清单；真删必须 dry_run=false 且 confirm=true。事件账本永远保留（可审计）。',
     parameters: {
@@ -2350,6 +2435,7 @@ export function apply(ctx, config) {
                     workspace: cwd,
                   })
                 } catch (err) { log('建线失败：' + describeError(err)) }
+              if (lane) syncLaneLabel(lane.id, text)
               }
               try {
                 if (lane) {
@@ -2453,24 +2539,91 @@ export function apply(ctx, config) {
                 if (node.parentId && nodes.has(node.parentId)) nodes.get(node.parentId).children.push(node)
                 else roots.push(node)
               }
-              const lanes = listLanes(db, { ownerId: cfg.ownerId, limit: 30 }).map((l) => {
+              // 负责人/工时：worker 类型 + 模型；工时从建单到处结（submitted/done/failed）或最后活跃
+              for (const node of nodes.values()) {
+                const ended = node.submittedAt || (['done', 'failed', 'cancelled', 'merged'].includes(node.status) ? node.updatedAt : null)
+                node.durationMs = ended ? Math.max(0, ended - node.createdAt) : null
+                node.acceptanceDone = (node.acceptance || []).filter((a) => a && a.done).length
+                node.acceptanceTotal = (node.acceptance || []).length
+              }
+              const laneList = listLanes(db, { ownerId: cfg.ownerId, limit: 30 })
+              const laneIds = new Set(laneList.map((l) => l.id))
+              // 按线分组的任务树：线是根，任务是子；无线归属的单独一组（游离）
+              const groups = laneList.map((l) => {
+                const items = [...nodes.values()]
+                  .filter((n) => n.laneId === l.id)
+                  .sort((a, b) => a.createdAt - b.createdAt)
+                  .map((n) => ({
+                    id: n.id, status: n.status, intent: n.intent, createdAt: n.createdAt, updatedAt: n.updatedAt,
+                    durationMs: n.durationMs, reviewMode: n.reviewMode, acceptanceDone: n.acceptanceDone,
+                    acceptanceTotal: n.acceptanceTotal, evidenceCount: n.evidenceCount, parentId: n.parentId,
+                  }))
+                return {
+                  id: l.id,
+                  label: l.label || (items[0] ? String(items[0].intent || '').slice(0, 24) : null),
+                  labelDerived: !l.label,
+                  status: l.status,
+                  workspace: l.workspace || null,
+                  reviewMode: l.reviewMode || null,
+                  lastUsedAt: l.lastUsedAt || null,
+                  total: items.length,
+                  running: items.filter((i) => ['running', 'submitted', 'queued', 'triaged'].includes(i.status)).length,
+                  done: items.filter((i) => i.status === 'done').length,
+                  failed: items.filter((i) => ['failed', 'blocked'].includes(i.status)).length,
+                  items,
+                }
+              }).filter((g) => g.total > 0 || g.status === 'active')
+              const loose = [...nodes.values()]
+                .filter((n) => !n.laneId || !laneIds.has(n.laneId))
+                .sort((a, b) => b.createdAt - a.createdAt)
+                .map((n) => ({
+                  id: n.id, status: n.status, intent: n.intent, createdAt: n.createdAt, updatedAt: n.updatedAt,
+                  durationMs: n.durationMs, reviewMode: n.reviewMode, acceptanceDone: n.acceptanceDone,
+                  acceptanceTotal: n.acceptanceTotal, evidenceCount: n.evidenceCount,
+                }))
+              const lanes = laneList.map((l) => {
                 const items = db.prepare(
-                  'SELECT id, status, created_at, updated_at, substr(intent, 1, 60) AS intent FROM workitems WHERE lane_id = ? ORDER BY created_at ASC LIMIT 100',
+                  'SELECT id, status, created_at, updated_at, submitted_at, review_mode, acceptance, evidence, substr(intent, 1, 60) AS intent FROM workitems WHERE lane_id = ? ORDER BY created_at ASC LIMIT 100',
                 ).all(l.id)
                 const rev = db.prepare(
                   'SELECT COUNT(*) AS c FROM revisions WHERE workitem_id IN (SELECT id FROM workitems WHERE lane_id = ?)',
                 ).get(l.id)
+                const mapped = items.map((w) => {
+                  let acc = []
+                  let ev = []
+                  try { acc = w.acceptance ? JSON.parse(w.acceptance) : [] } catch { acc = [] }
+                  try { ev = w.evidence ? JSON.parse(w.evidence) : [] } catch { ev = [] }
+                  const ended = Number(w.submitted_at || 0) || (['done', 'failed', 'cancelled', 'merged'].includes(w.status) ? Number(w.updated_at) : 0)
+                  return {
+                    id: w.id,
+                    status: w.status,
+                    from: Number(w.created_at),
+                    to: Number(w.updated_at),
+                    intent: w.intent,
+                    durationMs: ended ? Math.max(0, ended - Number(w.created_at)) : null,
+                    reviewMode: w.review_mode || null,
+                    acceptanceDone: acc.filter((a) => a && a.done).length,
+                    acceptanceTotal: acc.length,
+                    evidenceCount: ev.length,
+                  }
+                })
                 return {
                   id: l.id,
-                  label: l.label,
+                  label: l.label || (mapped[0] ? String(mapped[0].intent || '').slice(0, 24) : null),
+                  status: l.status,
                   workspace: l.workspace,
                   reviewMode: l.reviewMode,
                   sessionId: l.sessionId,
                   revisions: Number(rev.c),
-                  items: items.map((w) => ({ id: w.id, status: w.status, from: Number(w.created_at), to: Number(w.updated_at), intent: w.intent })),
+                  total: mapped.length,
+                  running: mapped.filter((w) => ['running', 'submitted', 'queued'].includes(w.status)).length,
+                  done: mapped.filter((w) => w.status === 'done').length,
+                  failed: mapped.filter((w) => ['failed', 'blocked'].includes(w.status)).length,
+                  latestAt: mapped.length ? Math.max(...mapped.map((w) => w.to)) : Number(l.lastUsedAt || 0),
+                  items: mapped,
                 }
               })
-              body = { ok: true, generatedAt: Date.now(), counts: summaryCounts(db), roots, lanes }
+              body = { ok: true, generatedAt: Date.now(), counts: summaryCounts(db), roots, groups, loose, lanes }
             } else if (path === '/stats') {
               const days = Math.max(1, Math.min(90, Number(url.searchParams.get('days')) || 14))
               body = { ok: true, ...statsSummary(db, { ownerId: cfg.ownerId, days }), suggestions: divisionSuggestions(db, { ownerId: cfg.ownerId, days }).suggestions }
@@ -2501,11 +2654,58 @@ export function apply(ctx, config) {
               body = {
                 ok: true,
                 counts: summaryCounts(db),
-                active: active.map((w) => ({ id: w.id, status: w.status, intent: w.intent, needsHuman: w.needsHuman, updatedAt: w.updatedAt, sessionId: w.sessionId, laneId: w.laneId, workspace: w.workspace, projectRoot: w.projectRoot, scope: w.scope, scopeSource: w.scopeSource, lastStep: lastWorkerTool(w.id), guidance: guidanceCounts[w.id] || 0, revisions: revisionCounts[w.id] || 0, latestRevision: latestRevision(db, w.id), cost: costFor(db, w.id) })),
+                active: active.map((w) => ({ id: w.id, status: w.status, intent: w.intent, needsHuman: w.needsHuman, createdAt: w.createdAt, updatedAt: w.updatedAt, sessionId: w.sessionId, laneId: w.laneId, workspace: w.workspace, projectRoot: w.projectRoot, scope: w.scope, scopeSource: w.scopeSource, lastStep: lastWorkerTool(w.id), guidance: guidanceCounts[w.id] || 0, revisions: revisionCounts[w.id] || 0, latestRevision: latestRevision(db, w.id), cost: costFor(db, w.id) })),
                 lanes: listLanes(db, { ownerId: cfg.ownerId, limit: 20 }).map((l) => ({ id: l.id, key: l.key, status: l.status, projectRoot: l.projectRoot, scope: l.scope, scopeMode: l.scopeMode, sessionId: l.sessionId, current: l.currentWorkitemId, lastUsedAt: l.lastUsedAt })),
                 needsHuman: active.filter((w) => w.needsHuman).length,
                 recent: db.prepare("SELECT * FROM workitems WHERE status IN ('done','failed','cancelled') ORDER BY updated_at DESC LIMIT 5").all().map((r) => ({ id: r.id, status: r.status, intent: String(r.intent || '').slice(0, 60), updatedAt: Number(r.updated_at), sessionId: r.session_id || null, laneId: r.lane_id || null, projectRoot: r.project_root || null, scope: r.scope || null, scopeSource: r.scope_source || null, scopeConfidence: r.scope_confidence ?? null, workspace: r.workspace || null, guidance: guidanceCounts[r.id] || 0, revisions: revisionCounts[r.id] || 0, latestRevision: latestRevision(db, r.id) })),
                 workers: Number(runningCount.n || 0),
+                // 告警：面板顶部要人看一眼的几件事（都不用点开才知道）
+                alerts: (() => {
+                  const out = []
+                  const timeoutSec = Math.max(60, Number(cfg.workerTimeoutSec) || 900)
+                  try {
+                    const silentMs = Math.max(120, Number(cfg.dispatchSilentSec) || 8 * 60) * 1000
+                    for (const s of findSilentDispatches(db, { silentMs })) {
+                      out.push({ level: 'warn', kind: 'silent', workitemId: s.id, text: '派单后没回音：' + String(s.intent || s.id).slice(0, 28) })
+                    }
+                  } catch { /* 检测失败不影响面板 */ }
+                  try {
+                    const slowCut = Date.now() - timeoutSec * 0.7 * 1000
+                    for (const r of db.prepare(
+                      `SELECT w.id, w.intent, COALESCE((SELECT MAX(e.ts) FROM events e WHERE e.workitem_id = w.id), w.updated_at) AS last
+                         FROM workitems w WHERE w.status = 'running'`,
+                    ).all()) {
+                      if (Number(r.last) < slowCut) {
+                        out.push({ level: 'warn', kind: 'slow', workitemId: r.id, text: '快超时（超 ' + timeoutSec + ' 秒不动就判死）：' + String(r.intent || r.id).slice(0, 26) })
+                      }
+                    }
+                  } catch { /* ignore */ }
+                  try {
+                    const sub = Number(db.prepare("SELECT COUNT(*) AS n FROM workitems WHERE status = 'submitted'").get().n || 0)
+                    if (sub) out.push({ level: 'info', kind: 'review', text: sub + ' 单待验收（secretary_review）' })
+                  } catch { /* ignore */ }
+                  try {
+                    const pend = Number(db.prepare("SELECT COUNT(*) AS n FROM tool_requests WHERE owner_id = ? AND status IN ('pending','escalated')").get(cfg.ownerId).n || 0)
+                    if (pend) out.push({ level: 'info', kind: 'tool', text: pend + ' 个工具申请待批' })
+                  } catch { /* ignore */ }
+                  if (state.overloaded) out.push({ level: 'warn', kind: 'resource', text: '资源过载，已收紧派单' })
+                  return out
+                })(),
+                system: {
+                  cores: state.hardware ? state.hardware.cores : null,
+                  totalMB: state.hardware ? state.hardware.totalMB : null,
+                  sampledAt: state.sample ? state.sample.at : null,
+                  availMB: state.sample ? state.sample.availMB : null,
+                  memUsedPercent: state.sample && state.sample.totalMB
+                    ? Math.round(((state.sample.totalMB - state.sample.availMB) / state.sample.totalMB) * 100)
+                    : null,
+                  load1: state.sample && state.sample.loadKnown ? state.sample.load1 : null,
+                  loadKnown: !!(state.sample && state.sample.loadKnown),
+                  concurrency: state.concurrency ? state.concurrency.current : null,
+                  desired: state.plan ? state.plan.desired : null,
+                  reason: state.plan ? state.plan.reason : null,
+                  overloaded: !!state.overloaded,
+                },
                 toolRequests: (() => {
                   const rows = db.prepare(
                     "SELECT id, tool, reason, workitem_id AS workitemId, want_scope AS scopeWanted, status, created_at AS createdAt FROM tool_requests WHERE owner_id = ? AND status IN ('pending','escalated') ORDER BY created_at DESC LIMIT 10",
@@ -2542,6 +2742,20 @@ export function apply(ctx, config) {
               }
             } else if (path === '/lanes') {
               body = { ok: true, lanes: listLanes(db, { ownerId: cfg.ownerId, limit: 50 }) }
+            } else if (path === '/board') {
+              const laneRef = url.searchParams.get('lane') || ''
+              const lane = laneRef ? findLaneRef(db, laneRef) : null
+              const kinds = String(url.searchParams.get('kind') || '').split(',').map((s) => s.trim()).filter(Boolean)
+              body = {
+                ok: true,
+                laneId: lane ? lane.id : null,
+                posts: listBoard(db, {
+                  ownerId: cfg.ownerId,
+                  laneId: lane ? lane.id : null,
+                  kinds: kinds.length ? kinds : null,
+                  limit: Number(url.searchParams.get('limit')) || 50,
+                }),
+              }
             } else if (path === '/channels') {
               body = { ok: true, policies: listPolicies(db) }
             } else if (path === '/outbox') {
@@ -2635,6 +2849,27 @@ export function apply(ctx, config) {
           if (timedOut.laneId) laneReleaseAndPump(timedOut.laneId)
           log('任务超时标 blocked：' + row.id)
         }
+        // 派单后毫无回音（resume 到死会话的典型症状）：不必等满 15 分钟，按更短的静默窗口判死
+        try {
+          const silentMs = Math.max(120, Number(cfg.dispatchSilentSec) || 8 * 60) * 1000
+          for (const row of findSilentDispatches(db, { silentMs })) {
+            const cur = getWorkItem(db, row.id)
+            if (!cur || cur.status !== ITEM_STATUS.RUNNING) continue
+            transition(db, cur.id, ITEM_STATUS.BLOCKED, {
+              reason: '派单后 ' + Math.round(silentMs / 60000) + ' 分钟工人没有任何回音（会话可能已失效）',
+              payload: { needsHuman: true },
+            })
+            closeWorkerSessions(cur.id)
+            // 这条线绑定的会话已经不可信：清掉，下次派单直接建新工人
+            if (cur.laneId) {
+              try { releaseLane(db, cur.laneId, { keepSession: false }) } catch { /* ignore */ }
+            }
+            const dead = getWorkItem(db, cur.id)
+            await notifyDelivery(dead, 'blocked')
+            if (dead.laneId) laneReleaseAndPump(dead.laneId)
+            log('派单后无回音标 blocked：' + dead.id)
+          }
+        } catch (err) { log('无回音检测失败：' + describeError(err)) }
         // 任务已结束但工具申请还挂着：自动拒绝，避免永久 pending 无人处理
         try {
           const stale = db.prepare(

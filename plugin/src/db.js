@@ -7,6 +7,24 @@ import { SCHEMA_VERSION } from './types.js'
 
 const MIGRATIONS = [
   {
+    version: 20,
+    sql: `
+-- 共享黑板：同一条线上的工人之间同步结论/待办/决定，不需要互相直接对话
+CREATE TABLE IF NOT EXISTS board_posts (
+  id           TEXT PRIMARY KEY,
+  owner_id     TEXT NOT NULL,
+  lane_id      TEXT,
+  workitem_id  TEXT,
+  kind         TEXT NOT NULL DEFAULT 'note',
+  text         TEXT NOT NULL,
+  pinned       INTEGER NOT NULL DEFAULT 0,
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_board_lane ON board_posts(owner_id, lane_id, created_at);
+`,
+  },
+  {
     version: 19,
     sql: `
 ALTER TABLE workitems ADD COLUMN acceptance TEXT;

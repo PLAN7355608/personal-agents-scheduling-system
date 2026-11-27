@@ -92,6 +92,155 @@ window.__ModuleLoader__.load({
       })
     }
 
+// 任务视图：树（outline）+ 泳道（线时间条）。数据来自 /secretary/v1/tree。
+function TreeAndLanes(props) {
+  // 面板里任何渲染异常都不能把胶囊一起带走：出错就静默隐藏这个视图
+  try {
+    return TreeAndLanesInner(props)
+  } catch (e) {
+    return null
+  }
+}
+
+function TreeAndLanesInner({ C, h }) {
+  const [view, setView] = React.useState('')
+  const [data, setData] = React.useState(null)
+  const [err, setErr] = React.useState('')
+  const [board, setBoard] = React.useState(null)
+  React.useEffect(() => {
+    if (!view) return
+    let alive = true
+    fetch('/secretary/v1/tree?limit=200', { headers: { accept: 'application/json' } })
+      .then((r) => r.json())
+      .then((j) => { if (alive) { setData(j); setErr('') } })
+      .catch((e) => { if (alive) setErr(String((e && e.message) || e)) })
+    fetch('/secretary/v1/board?limit=40', { headers: { accept: 'application/json' } })
+      .then((r) => r.json())
+      .then((j) => { if (alive) setBoard(j) })
+      .catch(() => { /* 黑板读不到不影响其他视图 */ })
+    return () => { alive = false }
+  }, [view])
+  const color = (st) => (st === 'done' ? C.ok : st === 'failed' ? C.bad : st === 'submitted' ? '#c8a03c' : st === 'running' ? C.accent : st === 'blocked' ? C.warn : C.dim)
+  const tab = (key, label) => h('span', {
+    key,
+    onClick: () => setView(view === key ? '' : key),
+    style: {
+      cursor: 'pointer', fontSize: 11, padding: '2px 8px', borderRadius: 999,
+      background: view === key ? 'rgba(142,168,255,0.22)' : 'rgba(255,255,255,0.06)',
+      color: view === key ? C.accent : C.dim,
+    },
+  }, label)
+  const [collapsed, setCollapsed] = React.useState({})
+  const stText = (st) => ({ done: '完成', failed: '失败', running: '进行中', submitted: '待验收', queued: '排队', triaged: '已分派', blocked: '卡住', cancelled: '取消', intake: '收件', merged: '已合并', running_noop: '进行中' }[st] || st || '')
+  const fmtDur = (ms) => (ms == null ? '' : ms < 60000 ? Math.round(ms / 1000) + 's' : ms < 3600000 ? Math.round(ms / 60000) + 'm' : (ms / 3600000).toFixed(1) + 'h')
+  const meta = (w) => [stText(w.status), fmtDur(w.durationMs != null ? w.durationMs : (w.status === 'running' ? Date.now() - w.createdAt : null)), w.acceptanceTotal ? '验收 ' + w.acceptanceDone + '/' + w.acceptanceTotal : '', w.evidenceCount ? '证据 ' + w.evidenceCount : '', w.reviewMode && w.reviewMode !== 'self' ? '验收方 ' + w.reviewMode : '']
+    .filter(Boolean).join(' · ')
+  const taskRow = (w, indent) => h('div', {
+    key: w.id,
+    style: { marginLeft: indent || 0, padding: '2px 0 2px 8px', borderLeft: '2px solid ' + C.border, marginBottom: 2 },
+  },
+  h('div', { style: { fontSize: 11.5, color: C.fg, display: 'flex', gap: 6, alignItems: 'baseline' } },
+    dot(color(w.status)),
+    h('span', { style: { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, (w.intent || w.id).slice(0, 60)),
+    h('span', { style: { fontSize: 10, color: color(w.status), flexShrink: 0 } }, stText(w.status))),
+  h('div', { style: { fontSize: 9.6, color: C.dim, marginLeft: 13 } }, meta(w)))
+  const groupBlock = (g) => {
+    const off = !!collapsed[g.id]
+    return h('div', { key: g.id, style: { marginBottom: 7 } },
+      h('div', {
+        onClick: () => setCollapsed(Object.assign({}, collapsed, { [g.id]: !off })),
+        style: { cursor: 'pointer', fontSize: 11.5, display: 'flex', gap: 6, alignItems: 'baseline', padding: '2px 0' },
+      },
+      h('span', { style: { color: C.dim, width: 8 } }, off ? '▸' : '▾'),
+      h('span', { style: { flex: 1, color: C.fg, fontWeight: 600 } }, g.label || '线 ' + String(g.id).slice(5, 13)),
+      h('span', { style: { fontSize: 9.6, color: C.dim } },
+        '在办 ' + (g.running || 0) + ' / 共 ' + g.total + (g.failed ? ' · 卡 ' + g.failed : '') + (g.done ? ' · 完 ' + g.done : ''))),
+      off ? null : h('div', { style: { marginLeft: 10 } }, (g.items || []).map((w) => taskRow(w, 0))))
+  }
+  const outline = () => {
+    const groups = (data && data.groups) || []
+    const loose = (data && data.loose) || []
+    if (!groups.length && !loose.length) return h('div', { style: { fontSize: 11, color: C.dim } }, '还没有任务。')
+    return h('div', {}, groups.map(groupBlock),
+      loose.length
+        ? h('div', { key: '__loose', style: { marginBottom: 7 } },
+            h('div', { style: { fontSize: 11.5, color: C.dim, padding: '2px 0' } }, '游离（没有归属的线）'),
+            h('div', { style: { marginLeft: 10 } }, loose.map((w) => taskRow(w, 0))))
+        : null)
+  }
+  const swimlanes = () => {
+    const lanes = (data && data.lanes) || []
+    const all = lanes.flatMap((l) => l.items || [])
+    if (!all.length) return h('div', { style: { fontSize: 11, color: C.dim } }, '线里还没有任务。')
+    const t0 = Math.min(...all.map((i) => i.from))
+    const t1 = Math.max(...all.map((i) => i.to), t0 + 60000)
+    const span = Math.max(60000, t1 - t0)
+    const label = (tMs) => new Date(tMs).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    const pct = (v) => Math.round(((v - t0) / span) * 100)
+    const ticks = [0, 0.25, 0.5, 0.75, 1]
+    const sorted = [...lanes].sort((a, b) => Number(b.latestAt || 0) - Number(a.latestAt || 0))
+    return h('div', {},
+      // 时间轴
+      h('div', { style: { position: 'relative', height: 14, marginBottom: 4, marginLeft: 2 } },
+        ticks.map((f, i) => h('div', {
+          key: 'tick' + i,
+          style: {
+            position: 'absolute', left: Math.round(f * 100) + '%', transform: 'translateX(-50%)',
+            fontSize: 9, color: C.dim, whiteSpace: 'nowrap',
+          },
+        }, i === 0 ? label(t0) : i === ticks.length - 1 ? label(t1) : label(t0 + span * f)))),
+      sorted.map((l) => h('div', { key: l.id, style: { marginBottom: 7 } },
+        h('div', { style: { fontSize: 10.5, color: C.dim, display: 'flex', gap: 6, alignItems: 'baseline' } },
+          h('span', { style: { width: 6, height: 6, borderRadius: 9, background: l.status === 'active' ? C.accent : C.dim, display: 'inline-block' } }),
+          h('span', { style: { color: C.fg, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, l.label || '线 ' + String(l.id).slice(5, 13)),
+          h('span', { style: { fontSize: 9.6, flexShrink: 0 } },
+            '在办 ' + (l.running || 0) + '/共 ' + (l.total || 0) + (l.failed ? ' · 卡 ' + l.failed : '') +
+            (l.revisions ? ' · 修订 ' + l.revisions : '') +
+            (l.reviewMode && l.reviewMode !== 'self' ? ' · 验收 ' + l.reviewMode : ''))),
+        h('div', { style: { position: 'relative', height: 13, background: 'rgba(255,255,255,0.05)', borderRadius: 4 } },
+          ticks.map((f, i) => h('div', {
+            key: 'grid' + i,
+            style: { position: 'absolute', left: f * 100 + '%', top: 0, bottom: 0, width: 1, background: 'rgba(255,255,255,0.07)' },
+          })),
+          (l.items || []).map((it) => h('div', {
+            key: it.id,
+            title: (it.intent || it.id) + ' · ' + stText(it.status) + (it.durationMs != null ? ' · ' + fmtDur(it.durationMs) : '') + (it.acceptanceTotal ? ' · 验收 ' + it.acceptanceDone + '/' + it.acceptanceTotal : ''),
+            style: {
+              position: 'absolute', top: 2, height: 9, borderRadius: 3,
+              left: Math.max(0, pct(it.from)) + '%',
+              width: Math.max(1.5, pct(Math.max(it.to, it.from + span * 0.004)) - Math.max(0, pct(it.from))) + '%',
+              background: color(it.status), opacity: it.status === 'done' ? 0.55 : 0.9,
+            },
+          })))))
+    )
+  }
+  const kindLabel = { note: '记', fact: '事实', todo: '待办', decision: '决定', blocked: '卡点' }
+  const boardView = () => {
+    const posts = (board && board.posts) || []
+    if (!posts.length) return h('div', { style: { fontSize: 11, color: C.dim } }, '黑板还是空的。工人在任务里贴结论后会出现在这里。')
+    const laneName = {}
+    for (const g of (data && data.groups) || []) laneName[g.id] = g.label
+    return h('div', { style: { maxHeight: 200, overflow: 'auto' } }, posts.map((p) => h('div', {
+      key: p.id,
+      style: { marginBottom: 5, padding: '3px 6px', borderRadius: 6, background: 'rgba(255,255,255,0.04)' },
+    },
+    h('div', { style: { fontSize: 9.6, color: C.dim } },
+      (kindLabel[p.kind] || p.kind) + (p.pinned ? ' · 钉住' : '') +
+      (p.laneId ? ' · ' + (laneName[p.laneId] || '线 ' + String(p.laneId).slice(5, 13)) : ' · 全局') +
+      ' · ' + new Date(p.createdAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })),
+    h('div', { style: { fontSize: 11, color: C.fg, whiteSpace: 'pre-wrap' } }, String(p.text || '').slice(0, 300)))))
+  }
+  return h('div', { style: { marginBottom: 8 } },
+    h('div', { style: { display: 'flex', gap: 6, marginBottom: 6 } }, tab('tree', '任务树'), tab('lanes', '泳道'), tab('board', '黑板')),
+    err ? h('div', { style: { fontSize: 10.5, color: C.bad } }, '视图接口错误：' + err) : null,
+    view === 'tree'
+      ? h('div', { style: { maxHeight: 220, overflow: 'auto' } }, data ? outline() : h('div', { style: { fontSize: 11, color: C.dim } }, '加载中…'))
+      : (view === 'lanes'
+          ? h('div', { style: { maxHeight: 220, overflow: 'auto' } }, data ? swimlanes() : h('div', { style: { fontSize: 11, color: C.dim } }, '加载中…'))
+          : (view === 'board' ? boardView() : null)))
+}
+
+
     function copyText(text) {
       try { navigator.clipboard.writeText(String(text)) } catch { /* ignore */ }
     }
@@ -174,6 +323,24 @@ window.__ModuleLoader__.load({
             (costToday.costCny > 0 ? ' · ¥' + Number(costToday.costCny).toFixed(2) : '') +
             ' ｜ 本月 ' + costMonth.tokens +
             (costMonth.costCny > 0 ? ' · ¥' + Number(costMonth.costCny).toFixed(2) : '')),
+          (data && data.system)
+            ? h('div', { style: { fontSize: 10.5, color: data.system.overloaded ? C.warn : C.dim, marginBottom: 6 } },
+                '资源 · 内存 ' + (data.system.memUsedPercent == null ? '—' : data.system.memUsedPercent + '%') +
+                ' · 负载 ' + (data.system.loadKnown ? Number(data.system.load1 || 0).toFixed(2) : '—') +
+                ' · 工人 ' + (data.workers || 0) + '/' + (data.system.concurrency == null ? '?' : data.system.concurrency) +
+                (data.system.overloaded ? ' · 过载中' : ''))
+            : null,
+          ((data && data.alerts) || []).length
+            ? h('div', { style: { marginBottom: 6 } },
+                (data.alerts || []).slice(0, 4).map((a, i) => h('div', {
+                  key: 'alert' + i,
+                  style: {
+                    fontSize: 10.5, marginBottom: 2, padding: '2px 6px', borderRadius: 6,
+                    color: a.level === 'warn' ? C.warn : C.dim,
+                    background: a.level === 'warn' ? 'rgba(220,170,60,0.12)' : 'rgba(255,255,255,0.05)',
+                  },
+                }, (a.level === 'warn' ? '⚠ ' : '· ') + a.text)))
+            : null,
           h('div', { style: { display: 'flex', gap: 6, marginBottom: 6 } },
             h('span', {
               onClick: () => setShowAll(false),
@@ -183,6 +350,7 @@ window.__ModuleLoader__.load({
               onClick: () => setShowAll(true),
               style: tabStyle(showAll),
             }, '看全部（含最近结束）')),
+          h(TreeAndLanes, { C, h }),
           err
             ? h('div', { style: { fontSize: 11.5, color: C.bad, marginBottom: 6 } }, '接口错误：' + err)
             : null,

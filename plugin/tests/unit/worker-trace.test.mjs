@@ -20,6 +20,7 @@ test('toolNameOf：拿工具名', () => {
 
 test('redactText：token/密码/Bearer 被抹掉', () => {
   assert.match(redactText('token=abc123'), /token=\*\*\*/)
+  // 演示用的假口令，故意保留在用例里；preflight-ignore 让体检查放过这一行
   assert.match(redactText('password: "hunter2"'), /password: "\*\*\*"/)
   assert.match(redactText('Authorization: Bearer eyJhbGci'), /Bearer \*\*\*/)
   assert.equal(redactText('C:/work/a.txt'), 'C:/work/a.txt')
@@ -45,7 +46,7 @@ test('resultOk：错误形态判失败', () => {
 
 test('buildWorkerToolEvent：无会话返回 null；有会话给出结构化 payload', () => {
   assert.equal(buildWorkerToolEvent({ exec: { tool: { name: 'write' } } }), null)
-  const payload = buildWorkerToolEvent({
+  const payload = buildWorkerToolEvent({ // preflight-ignore 用例里的 token 是假的
     exec: { agent: { sessionId: 'session-9' }, tool: { name: 'write' }, args: { path: 'C:/a.txt', token: 'secret' } },
     result: { ok: true },
     durationMs: 123,

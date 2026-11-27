@@ -6,6 +6,7 @@ import { ACTOR, EVENT_TYPE, ITEM_STATUS } from './types.js'
 import { normalizeWorkerPermission } from './guard.js'
 import { setLaneSession } from './lanes.js'
 import { looksLikeFileTask } from './filesniff.js'
+import { readSessionHeader } from './session-store.js'
 
 function svc(ctx, key) {
   try {
@@ -231,6 +232,13 @@ export async function dispatchWorker({ ctx, cfg, db, item, facts = [], memberTex
       } else if (agents && typeof agents.resume === 'function') {
         // 空闲被卸载的工人：resume 原会话，保持同一工人（身份不随空闲丢）。
         // 关键：resume 必须带 setup 重新 mount worker preset，否则恢复出来的 agent 没有工具/人设。
+        // 关键二：先确认会话日志还在。会话被清掉/换 profile 后 resume 会「成功」但收不到 prompt，
+        // 任务就永远卡在 running——这种情况直接换新工人。
+        const header = readSessionHeader(laneSessionId)
+        if (!header) {
+          log('原工人会话已没有日志，改用新工人：' + laneSessionId)
+          throw new Error('会话日志不存在，跳过 resume（改用新工人）')
+        }
         const presetSvc = svc(ctx, 'agentPresets')
         let setup
         if (presetSvc && typeof presetSvc.resolve === 'function' && typeof presetSvc.mount === 'function') {

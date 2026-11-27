@@ -1,7 +1,7 @@
 // 常量与契约：状态、事件、交付等级、schema 版本。
 // 所有"魔法字符串"只允许在这里出现，别的模块一律 import。
 
-export const SCHEMA_VERSION = 19;
+export const SCHEMA_VERSION = 20;
 
 /** 多用户缝：v0 恒为 'owner'，但代码里不许出现单用户隐含假设 */
 export const OWNER_DEFAULT = 'owner';
