@@ -54,6 +54,7 @@ import { pickDuplicate } from './src/dedupe.js'
 import { JUDGE_KIND, judgeToolDecision } from './src/judge.js'
 import { composeReply } from './src/language.js'
 import { listBoard, postBoard, removeBoard } from './src/board.js'
+import { bigFiles, defaultRoots, dirMap, humanBytes, recentFiles } from './src/filemap.js'
 import { buildBrief, buildReview, writeReport } from './src/briefing.js'
 import { applyArchive, scanArchive } from './src/archive.js'
 import { createHash, randomUUID } from 'node:crypto'
@@ -1981,6 +1982,86 @@ export function apply(ctx, config) {
         return { ok: true, dir, files, message: files.length ? '共 ' + files.length + ' 个模板' : '模板目录是空的：' + dir }
       } catch (err) {
         return { ok: false, message: '读取模板失败：' + describeError(err) }
+      }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'secretary_files',
+    description:
+      '宿主机文件地图（只读，不删不改）：map=看目录体积/文件数/最近改动，big=找大文件，recent=找最近改动。' +
+      '默认看配置的 searchDirs（没配就看工作区）；扫得太多会自动截断，慢盘有 8 秒预算。',
+    parameters: {
+      op: { type: 'string', description: 'map（默认）| big | recent' },
+      dirs: { type: 'string', description: '要看哪些目录（换行/逗号分隔）；不填用配置的 searchDirs 或工作区' },
+      limit: { type: 'number', description: '返回条数（map 默认 20，big/recent 默认 30）' },
+      min_mb: { type: 'number', description: 'big：只看大于多少 MB，默认 50' },
+      days: { type: 'number', description: 'recent：最近多少天，默认 1' },
+      depth: { type: 'number', description: '扫描深度（map 默认 2，big/recent 默认 8）' },
+    },
+    output: JSON_OUTPUT,
+    async execute(args) {
+      const op = String(args?.op || 'map').toLowerCase()
+      const raw = String(args?.dirs || '').trim()
+      const dirs = raw
+        ? raw.split(/[\n,;]+/).map((s) => s.trim()).filter(Boolean)
+        : defaultRoots({ workspaceRoot: cfg.workspaceRoot, searchDirs: cfg.searchDirs })
+      if (!dirs.length) return { ok: false, message: '没有可扫的目录：配置 searchDirs 或直接传 dirs' }
+      try {
+        if (op === 'big') {
+          const r = bigFiles(dirs, {
+            minBytes: Math.max(1, Number(args?.min_mb) || 50) * 1024 * 1024,
+            limit: Math.max(1, Math.min(100, Number(args?.limit) || 30)),
+            maxDepth: Math.max(1, Math.min(16, Number(args?.depth) || 8)),
+          })
+          return {
+            ok: true,
+            op,
+            dirs,
+            total: r.total,
+            truncated: r.truncated,
+            files: r.files.map((f) => ({ path: f.path, size: f.size, sizeHuman: humanBytes(f.size), mtime: f.mtime })),
+            message: r.total ? '找到 ' + r.total + ' 个超过阈值的大文件' : '没找到超过阈值的大文件',
+          }
+        }
+        if (op === 'recent') {
+          const r = recentFiles(dirs, {
+            sinceMs: Math.max(1, Number(args?.days) || 1) * 86400000,
+            limit: Math.max(1, Math.min(100, Number(args?.limit) || 30)),
+            maxDepth: Math.max(1, Math.min(16, Number(args?.depth) || 8)),
+          })
+          return {
+            ok: true,
+            op,
+            dirs,
+            total: r.total,
+            truncated: r.truncated,
+            files: r.files.map((f) => ({ path: f.path, size: f.size, sizeHuman: humanBytes(f.size), mtime: f.mtime })),
+            message: '最近改动 ' + r.total + ' 个文件',
+          }
+        }
+        const rows = dirMap(dirs, {
+          maxDepth: Math.max(1, Math.min(8, Number(args?.depth) || 2)),
+          limit: Math.max(1, Math.min(50, Number(args?.limit) || 20)),
+        })
+        return {
+          ok: true,
+          op: 'map',
+          dirs,
+          roots: rows.map((r) => ({
+            root: r.root,
+            files: r.files,
+            sizeHuman: humanBytes(r.bytes),
+            bytes: r.bytes,
+            newestAt: r.newestAt,
+            truncated: r.truncated,
+            scannedMs: r.scannedMs,
+            children: r.children.map((c) => ({ name: c.name, files: c.files, sizeHuman: humanBytes(c.bytes), bytes: c.bytes, newestAt: c.newestAt })),
+          })),
+          message: '扫了 ' + rows.length + ' 个根目录',
+        }
+      } catch (err) {
+        return { ok: false, message: '扫描失败：' + describeError(err) }
       }
     },
   }))
