@@ -1,6 +1,7 @@
 // 归档：扫描桌面/下载等目录，按扩展名规则给出候选（默认只提议不移动）。
 import { readdirSync, statSync, mkdirSync, renameSync, existsSync, copyFileSync, unlinkSync } from 'node:fs'
 import { basename, dirname, extname, isAbsolute, join } from 'node:path'
+import { bigFiles, humanBytes } from './filemap.js'
 
 function today() {
   const d = new Date()
@@ -40,6 +41,34 @@ export function scanArchive({ watchDirs = [], rules = [], minAgeHours = 24, now 
   }
   out.sort((a, b) => a.mtime - b.mtime)
   return out
+}
+
+/**
+ * 大文件归档提议：按大小（可选按年龄）挑出来，能匹配扩展名规则的给出建议目标，
+ * 匹配不上的 target=null（需要主人自己指定目标目录）。只提议，不动文件。
+ */
+export function proposeBig({
+  dirs = [], rules = [], minBytes = 100 * 1024 * 1024, minAgeDays = 0, maxDepth = 8, limit = 30, now = Date.now(),
+} = {}) {
+  const cutoff = Number(minAgeDays) > 0 ? now - Number(minAgeDays) * 86400000 : 0
+  const r = bigFiles(dirs, { minBytes, limit: Math.max(50, limit * 4), maxDepth, now })
+  const items = []
+  for (const f of r.files) {
+    if (cutoff && f.mtime > cutoff) continue
+    const ext = extname(f.path).toLowerCase()
+    const rule = rules.find((rr) => (rr.ext || []).map((e) => String(e).toLowerCase()).includes(ext))
+    items.push({
+      path: f.path,
+      name: basename(f.path),
+      ext,
+      size: f.size,
+      sizeHuman: humanBytes(f.size),
+      mtime: f.mtime,
+      target: rule ? targetFor(rule, ext, f.mtime) : null,
+    })
+    if (items.length >= limit) break
+  }
+  return { items, total: items.length, scanned: r.total, truncated: r.truncated }
 }
 
 export function applyArchive(candidates = []) {

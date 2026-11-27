@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, readdirSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyArchive, scanArchive } from '../../src/archive.js'
+import { applyArchive, proposeBig, scanArchive } from '../../src/archive.js'
 
 function setup() {
   const root = mkdtempSync(join(tmpdir(), 'arch-'))
@@ -41,4 +41,37 @@ test('归档执行：移动到目标目录（{ext} 展开）', () => {
   assert.equal(r.failed.length, 0)
   assert.deepEqual(readdirSync(join(inbox)).sort(), ['b.docx', 'new.pdf', 'skip.txt'])
   assert.deepEqual(readdirSync(join(inbox, '..', 'out', 'pdf')), ['a.pdf'])
+})
+
+test('大文件提议：按大小挑出、能匹配规则的给出目标、匹配不上的 target=null', () => {
+  const root = mkdtempSync(join(tmpdir(), 'archbig-'))
+  const inbox = join(root, 'inbox')
+  mkdirSync(inbox, { recursive: true })
+  const big = Buffer.alloc(2 * 1024 * 1024)
+  writeFileSync(join(inbox, 'video.mp4'), big)
+  writeFileSync(join(inbox, 'blob.weird'), big)
+  writeFileSync(join(inbox, 'small.mp4'), 'x')
+  const out = join(root, 'out')
+  const r = proposeBig({
+    dirs: [inbox],
+    rules: [{ ext: ['.mp4'], target: join(out, '{ext}') }],
+    minBytes: 1024 * 1024,
+    limit: 10,
+  })
+  assert.equal(r.total, 2)
+  const video = r.items.find((i) => i.name === 'video.mp4')
+  assert.equal(video.target, join(out, 'mp4'))
+  const weird = r.items.find((i) => i.name === 'blob.weird')
+  assert.equal(weird.target, null)
+  assert.equal(video.sizeHuman, '2.0 MB')
+})
+
+test('大文件提议：按年龄过滤（太新的不算）', () => {
+  const root = mkdtempSync(join(tmpdir(), 'archbig2-'))
+  mkdirSync(root, { recursive: true })
+  writeFileSync(join(root, 'new.iso'), Buffer.alloc(1024 * 1024))
+  const fresh = proposeBig({ dirs: [root], minBytes: 512 * 1024, minAgeDays: 30 })
+  assert.equal(fresh.total, 0)
+  const any = proposeBig({ dirs: [root], minBytes: 512 * 1024, minAgeDays: 0 })
+  assert.equal(any.total, 1)
 })

@@ -56,10 +56,10 @@ import { composeReply } from './src/language.js'
 import { listBoard, postBoard, removeBoard } from './src/board.js'
 import { bigFiles, defaultRoots, dirMap, humanBytes, recentFiles } from './src/filemap.js'
 import { buildBrief, buildReview, writeReport } from './src/briefing.js'
-import { applyArchive, scanArchive } from './src/archive.js'
+import { applyArchive, proposeBig, scanArchive } from './src/archive.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { buildWorkitemTrace } from './src/trace.js'
 import { buildPersonaBlock, describePersona, setPersona } from './src/persona.js'
 import { forget, recall, remember, stats as memoryStats } from './src/memory.js'
@@ -1932,9 +1932,16 @@ export function apply(ctx, config) {
 
   ctx.tools.register(defineTool({
     name: 'secretary_archive',
-    description: '桌面/下载归档：scan 扫描候选（默认只提议），apply 执行移动（需配置 app 里 archive.allowApply=true）。规则按扩展名匹配到目标目录。',
+    description:
+      '归档：scan 按扩展名规则扫候选（默认只提议）；big 按大小/年龄找大文件并给建议目标；' +
+      'apply / apply_big 才真移动（都要配置 archive.allowApply=true）。跨盘移动算真移动，先看提议再执行。',
     parameters: {
-      op: { type: 'string', description: 'scan（默认）| apply | status' },
+      op: { type: 'string', description: 'scan（默认）| big | apply | apply_big | status' },
+      dirs: { type: 'string', description: 'big：扫哪些目录（换行/逗号分隔）；不填用 archive.watchDirs' },
+      min_mb: { type: 'number', description: 'big：大于多少 MB，默认 100' },
+      days: { type: 'number', description: 'big：只看多少天以前（0=不限），默认 0' },
+      paths: { type: 'string', description: 'apply_big：要移动的文件路径（换行分隔），一般直接抄 big 提议里的 path' },
+      target: { type: 'string', description: 'apply_big：移动到哪个绝对目录（必须显式给）' },
     },
     output: JSON_OUTPUT,
     async execute(args) {
@@ -1942,6 +1949,53 @@ export function apply(ctx, config) {
       const conf = cfg.archive || {}
       if (op === 'status') {
         return { ok: true, enabled: !!conf.enabled, allowApply: !!conf.allowApply, watchDirs: conf.watchDirs || [], rules: conf.rules || [], minAgeHours: conf.minAgeHours ?? 24 }
+      }
+      if (op === 'big') {
+        const rawDirs = String(args?.dirs || '').trim()
+        const dirs = rawDirs
+          ? rawDirs.split(/[\n,;]+/).map((s) => s.trim()).filter(Boolean)
+          : (conf.watchDirs || [])
+        if (!dirs.length) return { ok: false, message: '没有可扫的目录：配置 archive.watchDirs 或传 dirs' }
+        const minMB = Math.max(1, Number(args?.min_mb) || 100)
+        const r = proposeBig({
+          dirs,
+          rules: archiveRules(),
+          minBytes: minMB * 1024 * 1024,
+          minAgeDays: Math.max(0, Number(args?.days) || 0),
+          limit: 30,
+        })
+        appendEvent(db, { type: EVENT_TYPE.ARCHIVE_SCANNED, ownerId: cfg.ownerId, actor: ACTOR.KERNEL, payload: { kind: 'big', count: r.total, minMB } })
+        return {
+          ok: true,
+          op: 'big',
+          dirs,
+          minMB,
+          total: r.total,
+          truncated: r.truncated,
+          items: r.items,
+          allowed: !!conf.allowApply,
+          message: r.total
+            ? '找到 ' + r.total + ' 个大文件（合计 ' + humanBytes(r.items.reduce((s, x) => s + x.size, 0)) + '）。要移动就把 path 抄进 apply_big 并给出 target；allowApply=' + (conf.allowApply ? 'true' : 'false（当前只提议）')
+            : '没有超过 ' + minMB + ' MB 的文件',
+        }
+      }
+      if (op === 'apply_big') {
+        const target = String(args?.target || '').trim()
+        if (!target) return { ok: false, message: 'apply_big 必须给 target（绝对目录）' }
+        if (!isAbsolute(target)) return { ok: false, message: 'target 必须是绝对路径：' + target }
+        const paths = String(args?.paths || '').split(/[\n;]+/).map((s) => s.trim()).filter(Boolean)
+        if (!paths.length) return { ok: false, message: 'apply_big 要给 paths（big 提议里的 path，换行分隔）' }
+        if (!conf.allowApply) {
+          return { ok: false, message: '当前只提议模式：先到配置里打开 archive.allowApply 才能真移动（要动的文件：' + paths.length + ' 个）' }
+        }
+        const result = applyArchive(paths.map((p) => ({ path: p, target })))
+        return {
+          ok: true,
+          op: 'apply_big',
+          moved: result.moved,
+          failed: result.failed,
+          message: '已移动 ' + result.moved.length + ' 个' + (result.failed.length ? '，失败 ' + result.failed.length + ' 个' : ''),
+        }
       }
       const candidates = scanArchive({ watchDirs: conf.watchDirs || [], rules: archiveRules(), minAgeHours: conf.minAgeHours ?? 24 })
       if (op === 'scan' || !conf.allowApply) {
